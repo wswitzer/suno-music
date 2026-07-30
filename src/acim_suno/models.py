@@ -54,6 +54,9 @@ class LessonRecord(StrictModel):
     lesson_type: LessonType = LessonType.STANDARD
     source: SourceMetadata
     sentences: list[SourceSentence] = Field(min_length=1)
+    paragraphs: list[str] = Field(default_factory=list)
+    practice_instructions: dict[str, str] = Field(default_factory=dict)
+    reviewed_lessons: list[dict] | None = None
 
     @property
     def source_text(self) -> str:
@@ -87,11 +90,18 @@ class StyleRecord(StrictModel):
         return self
 
 
+class NormalizedStyleRegistry(StrictModel):
+    registry_version: str
+    styles: list[StyleRecord]
+    source_csv_hash: str | None = None
+
+
 class CompatibilityScore(StrictModel):
     lesson_number: int
     language: str = "en"
     style_id: str
     total: float = Field(ge=0, le=10)
+    dimensions: dict[str, float] = Field(default_factory=dict)
     reason: str | None = None
     risks: list[str] = Field(default_factory=list)
 
@@ -119,6 +129,13 @@ class AssignmentRecord(StrictModel):
     assignment_version: str
 
 
+class AssignmentManifest(StrictModel):
+    manifest_version: str
+    generated_at: str
+    assignments: list[AssignmentRecord]
+    constraints: AssignmentConstraints
+
+
 class StyleAdaptation(StrictModel):
     style_id: str
     lesson_number: int
@@ -127,6 +144,94 @@ class StyleAdaptation(StrictModel):
     final_prompt: str
     bpm: int | None = None
     core_identity_preserved: bool = True
+
+
+class LessonAnalysisProfile(StrictModel):
+    lesson_number: int
+    language: str = "en"
+    lesson_type: LessonType
+    themes: list[str] = Field(default_factory=list)
+    emotional_start: str = "neutral"
+    emotional_destination: str = "peace"
+    energy_target: float = Field(default=0.5, ge=0, le=1)
+    lyric_density: Literal["low", "medium", "high"] = "medium"
+    repetition_affinity: float = Field(default=0.5, ge=0, le=1)
+    spoken_word_need: float = Field(default=0.3, ge=0, le=1)
+    clarity_requirement: float = Field(default=0.5, ge=0, le=1)
+    preferred_arc: str = "build_up"
+    suitable_traits: list[str] = Field(default_factory=list)
+    unsuitable_traits: list[str] = Field(default_factory=list)
+    ranked_archetypes: list[SongArchetype] = Field(default_factory=list)
+    analyzed_source_hash: str = ""
+    analysis_version: str = "0.1.0"
+
+
+class PlanSection(StrictModel):
+    label: str
+    function: str
+    source_sentence_ids: list[str] = Field(default_factory=list)
+    treatment: Literal["sung", "spoken", "instrumental"] = "sung"
+    repetition_count: int = 1
+
+
+class LyricPlan(StrictModel):
+    lesson_number: int
+    archetype: SongArchetype
+    sections: list[PlanSection]
+    total_word_count: int = 0
+    spoken_word_count: int = 0
+
+
+class GeneratedLyric(StrictModel):
+    section_label: str
+    text: str
+
+
+class SongArtifact(StrictModel):
+    lesson_number: int
+    title: str
+    archetype: SongArchetype
+    lesson_type: LessonType
+    language: str = "en"
+    style_id: str
+    style_adaptation: StyleAdaptation
+    lyric_plan: LyricPlan
+    lyrics: list[GeneratedLyric]
+    full_lyrics_text: str
+    source_hash: str
+    assignment_version: str
+    generator_version: str
+
+    @property
+    def total_words(self) -> int:
+        return len(self.full_lyrics_text.split())
+
+
+class TargetedRepairRequest(StrictModel):
+    lesson_number: int
+    language: str = "en"
+    failed_fields: list[str] = Field(default_factory=list)
+    validator_report: ValidationReport | None = None
+    current_artifact: SongArtifact | None = None
+    retry_count: int = 0
+    max_retries: int = 3
+    error_messages: list[str] = Field(default_factory=list)
+
+
+class FinalSongArtifact(StrictModel):
+    lesson_number: int
+    language: str = "en"
+    title: str
+    style_id: str
+    style_prompt: str
+    lyrics: str
+    archetype: str
+    lesson_type: str
+    source_hash: str
+    assignment_version: str
+    generator_version: str
+    repair_count: int = 0
+    passed_validation: bool = False
 
 
 class ValidationIssue(StrictModel):
@@ -140,3 +245,25 @@ class ValidationReport(StrictModel):
     passed: bool
     issues: list[ValidationIssue] = Field(default_factory=list)
     metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class PipelineConfig(StrictModel):
+    lesson_min: int = 116
+    lesson_max: int = 199
+    languages: list[str] = Field(default_factory=lambda: ["en"])
+    seed: int = 116199
+    lyrics_policy: LyricPolicy = LyricPolicy.VERBATIM_ONLY
+    maximum_total_words: int = 550
+    maximum_spoken_words: int = 220
+    maximum_repair_attempts: int = 3
+    style_registry_version: str = "0.1.0"
+    assignment_version: str = "scipy-milp-0.1.0"
+
+
+class BatchExport(StrictModel):
+    export_version: str
+    generated_at: str
+    songs: list[FinalSongArtifact]
+    total_lessons: int
+    passed_count: int
+    failed_count: int
