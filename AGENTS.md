@@ -4,6 +4,17 @@
 
 Extend this starter into the production pipeline for ACIM Workbook Lessons 116–199 without weakening deterministic assignment or source validation.
 
+## Git workflow
+
+See `docs/agents/git-workflow.md` for full conventions. TL;DR:
+
+- **Atomic commits** — one logical change per commit (models, then provider, then optimizer, etc.)
+- **Small diffs** — max ~400 lines per commit; commit after every passing test cycle
+- **Branch** — `agent/<ticket>-<desc>` per task; never commit to `main`
+- **Messages** — imperative mood, ≤72-char subject, body explains *why*
+- **No generated artifacts** — exclude outputs/, __pycache__/, .env, node_modules/
+- **No copyrighted text, keys, or private data** in commits
+
 ## Preserve these invariants
 
 1. Never let an LLM greedily assign styles one lesson at a time.
