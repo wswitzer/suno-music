@@ -1,0 +1,28 @@
+project:
+  lesson_min: 116
+  lesson_max: 199
+  languages: [en]
+  seed: 116199
+
+assignment:
+  minimum_style_usage: 1
+  maximum_style_usage: 2
+  minimum_exact_style_gap: 8
+  maximum_consecutive_primary_bucket: 2
+  missing_score_policy: error
+
+lyrics:
+  policy: verbatim_only
+  maximum_total_words: 550
+  maximum_spoken_words: 220
+  maximum_repair_attempts: 3
+
+versions:
+  style_registry: 0.1.0
+  lesson_analyzer_prompt: 0.1.0
+  style_scorer_prompt: 0.1.0
+  archetype_selector_prompt: 0.1.0
+  lyric_planner_prompt: 0.1.0
+  lyric_writer_prompt: 0.1.0
+  assignment_algorithm: scipy-milp-0.1.0
+  validators: 0.1.0
