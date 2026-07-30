@@ -68,7 +68,4 @@ def filter_scores_for_optimizer(
 ) -> list[CompatibilityScore]:
     lesson_numbers = {l.lesson_number for l in lessons}
     style_ids = {s.style_id for s in styles}
-    return [
-        s for s in scores
-        if s.lesson_number in lesson_numbers and s.style_id in style_ids
-    ]
+    return [s for s in scores if s.lesson_number in lesson_numbers and s.style_id in style_ids]

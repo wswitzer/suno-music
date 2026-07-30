@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .models import (
@@ -58,7 +58,7 @@ def export_suno_batch(
 
     batch = BatchExport(
         export_version=export_version,
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=datetime.now(UTC).isoformat(),
         songs=artifacts,
         total_lessons=len(artifacts),
         passed_count=passed_count,
@@ -72,22 +72,33 @@ def export_suno_batch(
 
     csv_path = out_dir / "suno_batch.csv"
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "lesson_number", "title", "archetype", "style_id", "style_prompt",
-            "lyrics", "source_hash", "passed_validation",
-        ])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "lesson_number",
+                "title",
+                "archetype",
+                "style_id",
+                "style_prompt",
+                "lyrics",
+                "source_hash",
+                "passed_validation",
+            ],
+        )
         writer.writeheader()
         for song in artifacts:
-            writer.writerow({
-                "lesson_number": song.lesson_number,
-                "title": song.title,
-                "archetype": song.archetype,
-                "style_id": song.style_id,
-                "style_prompt": song.style_prompt,
-                "lyrics": song.lyrics,
-                "source_hash": song.source_hash,
-                "passed_validation": str(song.passed_validation),
-            })
+            writer.writerow(
+                {
+                    "lesson_number": song.lesson_number,
+                    "title": song.title,
+                    "archetype": song.archetype,
+                    "style_id": song.style_id,
+                    "style_prompt": song.style_prompt,
+                    "lyrics": song.lyrics,
+                    "source_hash": song.source_hash,
+                    "passed_validation": str(song.passed_validation),
+                }
+            )
 
     batch_json_path = out_dir / "batch_export.json"
     batch_json_path.write_text(
@@ -117,8 +128,12 @@ def export_lesson_folder(
 
     artifact_path = lesson_dir / "artifact.json"
     artifact_path.write_text(
-        json.dumps(convert_to_final_artifact(song, report).model_dump(mode="json"),
-                   indent=2, ensure_ascii=False) + "\n",
+        json.dumps(
+            convert_to_final_artifact(song, report).model_dump(mode="json"),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
 

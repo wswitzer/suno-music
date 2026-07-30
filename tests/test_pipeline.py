@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
+from acim_suno.cli import command_generate_lyrics
 from acim_suno.extract_styles import extract_styles_from_csv
+from acim_suno.io import dump_json
+from acim_suno.llm import MockLLMProvider, generate_lyrics, score_compatibility, select_archetype
 from acim_suno.models import (
     AssignmentConstraints,
     CompatibilityScore,
+    CompatibilityScoreBatch,
+    GeneratedLyricsResponse,
+    LessonAnalysisProfile,
     LessonRecord,
+    LyricPlan,
+    PlanSection,
+    SongArchetype,
+    SongArchetypeSelection,
     SourceMetadata,
     SourceSentence,
     StyleAdaptation,
     StyleRecord,
 )
 from acim_suno.optimizer import optimize_assignments
+from acim_suno.sources import ACIMJsonSourceProvider
 from acim_suno.validators import (
     validate_assignment_batch,
     validate_style_adaptation,
@@ -105,3 +119,112 @@ def test_csv_extractor_filters_and_deduplicates(tmp_path: Path) -> None:
     )
     styles = extract_styles_from_csv(csv_path)
     assert [style.style_id for style in styles] == ["STYLE_295", "STYLE_305"]
+
+
+def test_parenthesized_invented_adlib_is_rejected() -> None:
+    report = validate_verbatim_lyrics("(Peace is within.)", "I am safe.")
+    assert not report.passed
+    assert report.issues[0].code == "non_verbatim_line"
+
+    direction = validate_verbatim_lyrics("(Soft instrumental)\nI am safe.", "I am safe.")
+    assert direction.passed
+
+
+def test_provider_rejects_language_relabeling(tmp_path: Path) -> None:
+    source_path = tmp_path / "workbook.json"
+    source_path.write_text(
+        '{"language":"en","parts":{"one":{"lessons":{}}}}',
+        encoding="utf-8",
+    )
+    provider = ACIMJsonSourceProvider(source_path, source_language="en")
+    with pytest.raises(ValueError, match="requested 'es'"):
+        provider.fetch_lessons(116, 116, language="es")
+    with pytest.raises(ValueError, match="Source declares language"):
+        ACIMJsonSourceProvider(source_path, source_language="es")
+
+
+def test_high_level_llm_calls_use_pydantic_wrappers() -> None:
+    llm = MockLLMProvider()
+    item = lesson(116)
+    style = StyleRecord(
+        style_id="STYLE_1",
+        name="Demo",
+        core_prompt="Warm acoustic folk.",
+    )
+    scores = score_compatibility(item, [style], llm)
+    assert scores
+    assert CompatibilityScoreBatch(scores).root == scores
+
+    profile = LessonAnalysisProfile(
+        lesson_number=116,
+        lesson_type="standard",
+        ranked_archetypes=[],
+    )
+    archetype = select_archetype(item, profile, llm)
+    assert SongArchetypeSelection(archetype=archetype).archetype is archetype
+
+    plan = LyricPlan(
+        lesson_number=116,
+        language="en",
+        archetype=SongArchetype.TITLE_TEACHING_PRAYER,
+        sections=[
+            PlanSection(
+                label="Chorus",
+                function="title",
+                source_sentence_ids=["title"],
+            )
+        ],
+    )
+    adaptation = StyleAdaptation(
+        style_id="STYLE_1",
+        lesson_number=116,
+        core_prompt=style.core_prompt,
+        adaptation="Gentle delivery.",
+        final_prompt=f"{style.core_prompt} Gentle delivery.",
+    )
+    lyrics = generate_lyrics(item, plan, adaptation, llm)
+    assert GeneratedLyricsResponse(lyrics).root == lyrics
+
+
+def test_staged_generate_lyrics_command_uses_plan_language(tmp_path: Path) -> None:
+    item = lesson(116)
+    plan = LyricPlan(
+        lesson_number=116,
+        language="en",
+        archetype=SongArchetype.TITLE_TEACHING_PRAYER,
+        sections=[
+            PlanSection(
+                label="Chorus",
+                function="title",
+                source_sentence_ids=["title"],
+            )
+        ],
+    )
+    adaptation = StyleAdaptation(
+        style_id="STYLE_1",
+        lesson_number=116,
+        core_prompt="Warm acoustic folk.",
+        adaptation="Gentle delivery.",
+        final_prompt="Warm acoustic folk. Gentle delivery.",
+    )
+    lessons_path = tmp_path / "lessons.json"
+    plans_path = tmp_path / "plans.json"
+    adaptations_path = tmp_path / "adaptations.json"
+    output_path = tmp_path / "songs.json"
+    dump_json(lessons_path, [item])
+    dump_json(plans_path, [plan])
+    dump_json(adaptations_path, [adaptation])
+
+    result = command_generate_lyrics(
+        Namespace(
+            lessons=str(lessons_path),
+            plans=str(plans_path),
+            adaptations=str(adaptations_path),
+            provider="mock",
+            model=None,
+            prompt_version="0.1.0",
+            out=str(output_path),
+        )
+    )
+    assert result == 0
+    assert output_path.exists()

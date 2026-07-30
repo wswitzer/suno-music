@@ -8,8 +8,29 @@ from .models import StyleRecord
 
 BPM_PATTERN = re.compile(r"(?<!\d)(\d{2,3})\s*BPM\b", re.IGNORECASE)
 ENERGY_KW = {
-    "high": ["energetic", "upbeat", "driving", "powerful", "intense", "punchy", "high energy", "loud", "bright"],
-    "low": ["ambient", "soft", "gentle", "mellow", "calm", "quiet", "minimal", "sparse", "intimate", "dreamy"],
+    "high": [
+        "energetic",
+        "upbeat",
+        "driving",
+        "powerful",
+        "intense",
+        "punchy",
+        "high energy",
+        "loud",
+        "bright",
+    ],
+    "low": [
+        "ambient",
+        "soft",
+        "gentle",
+        "mellow",
+        "calm",
+        "quiet",
+        "minimal",
+        "sparse",
+        "intimate",
+        "dreamy",
+    ],
 }
 
 DENSITY_KW = {
@@ -98,9 +119,30 @@ def _infer_bucket(text: str) -> str:
 
 
 def _infer_tags(text: str) -> list[str]:
-    genre_tags = ["acoustic", "electronic", "ambient", "folk", "rock", "pop", "soul", "jazz",
-                  "latin", "hiphop", "sacred", "world", "funk", "experimental", "orchestral",
-                  "r&b", "blues", "reggae", "country", "punk", "metal", "classical"]
+    genre_tags = [
+        "acoustic",
+        "electronic",
+        "ambient",
+        "folk",
+        "rock",
+        "pop",
+        "soul",
+        "jazz",
+        "latin",
+        "hiphop",
+        "sacred",
+        "world",
+        "funk",
+        "experimental",
+        "orchestral",
+        "r&b",
+        "blues",
+        "reggae",
+        "country",
+        "punk",
+        "metal",
+        "classical",
+    ]
     found = []
     lower = text.lower()
     for tag in genre_tags:
@@ -181,12 +223,16 @@ def extract_and_normalize_styles_pipeline(
         encoding="utf-8",
     )
     normalized_path.write_text(
-        json.dumps([s.model_dump(mode="json") for s in normalized], indent=2, ensure_ascii=False) + "\n",
+        json.dumps([s.model_dump(mode="json") for s in normalized], indent=2, ensure_ascii=False)
+        + "\n",
         encoding="utf-8",
     )
 
-    needs_review = [s.model_dump(mode="json") for s in normalized
-                    if "unclassified_bucket_needs_review" in s.risks]
+    needs_review = [
+        s.model_dump(mode="json")
+        for s in normalized
+        if "unclassified_bucket_needs_review" in s.risks
+    ]
     review_path.write_text(
         json.dumps(needs_review, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",

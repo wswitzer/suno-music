@@ -59,8 +59,7 @@ def extract_styles_from_csv(
                 StyleRecord(
                     style_id=f"STYLE_{lesson_number}",
                     source_lesson=lesson_number,
-                    name=_first_present(row, TITLE_COLUMNS)
-                    or f"Source lesson {lesson_number}",
+                    name=_first_present(row, TITLE_COLUMNS) or f"Source lesson {lesson_number}",
                     core_prompt=prompt,
                 )
             )

@@ -46,8 +46,7 @@ def optimize_assignments(
         )
 
     score_map = {
-        (score.lesson_number, score.language, score.style_id): score.total
-        for score in scores
+        (score.lesson_number, score.language, score.style_id): score.total for score in scores
     }
     unknown_styles = {score.style_id for score in scores} - set(style_by_id)
     if unknown_styles:
@@ -75,9 +74,7 @@ def optimize_assignments(
     rows: list[tuple[dict[int, float], float, float]] = []
 
     for li in range(lesson_count):
-        rows.append(
-            ({variable_index(li, si): 1.0 for si in range(style_count)}, 1.0, 1.0)
-        )
+        rows.append(({variable_index(li, si): 1.0 for si in range(style_count)}, 1.0, 1.0))
 
     for si in range(style_count):
         rows.append(
@@ -172,9 +169,7 @@ def optimize_assignments(
                 style_id=style.style_id,
                 primary_bucket=style.primary_bucket,
                 fit_score=float(
-                    score_map.get(
-                        (lesson.lesson_number, lesson.language, style.style_id), 0.0
-                    )
+                    score_map.get((lesson.lesson_number, lesson.language, style.style_id), 0.0)
                 ),
                 assignment_version=assignment_version,
             )

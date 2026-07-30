@@ -27,7 +27,7 @@ def load_jsonl_models(path: str | Path, model_type: type[T]) -> list[T]:
                 continue
             try:
                 records.append(model_type.model_validate(json.loads(line)))
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise ValueError(f"Invalid JSONL at {path}:{line_number}: {exc}") from exc
     return records
 

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
+from .adapter import create_style_adaptation
 from .export import export_lesson_folder, export_suno_batch
 from .extract_styles import extract_styles_from_csv
 from .generator import generate_song
@@ -19,8 +20,8 @@ from .models import (
     AssignmentRecord,
     CompatibilityScore,
     FinalSongArtifact,
-    LessonRecord,
     LessonAnalysisProfile,
+    LessonRecord,
     LyricPlan,
     NormalizedStyleRegistry,
     PipelineConfig,
@@ -33,7 +34,6 @@ from .models import (
 from .normalize_styles import extract_and_normalize_styles_pipeline, normalize_styles
 from .optimizer import AssignmentError, optimize_assignments
 from .planner import choose_archetype, create_lyric_plan
-from .adapter import create_style_adaptation
 from .repair import create_repair_request, repair_song
 from .scorer import compute_compatibility_scores
 from .sources import ACIMJsonSourceProvider
@@ -51,15 +51,20 @@ def _load_config(args: argparse.Namespace) -> PipelineConfig:
 
 def command_audit_csv(args: argparse.Namespace) -> int:
     import csv
+
     csv_path = Path(args.csv)
     with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
         rows = list(reader)
 
     styles_raw = set()
-    lesson_range = range(args.min_lesson or 1, (args.max_lesson or 365) + 1)
-    range_rows = [r for r in rows if r.get("lesson_number", "").isdigit()
-                  and args.min_lesson <= int(r["lesson_number"]) <= (args.max_lesson or 365)]
+    range(args.min_lesson or 1, (args.max_lesson or 365) + 1)
+    range_rows = [
+        r
+        for r in rows
+        if r.get("lesson_number", "").isdigit()
+        and args.min_lesson <= int(r["lesson_number"]) <= (args.max_lesson or 365)
+    ]
 
     for r in range_rows:
         prompt = (r.get("styles_raw") or r.get("suno_style") or r.get("style") or "").strip()
@@ -134,7 +139,9 @@ def command_score_compatibility(args: argparse.Namespace) -> int:
     styles = load_models(args.styles, StyleRecord)
     llm = create_llm_provider(args.provider, args.model)
     scores = compute_compatibility_scores(
-        lessons, styles, llm,
+        lessons,
+        styles,
+        llm,
         prompt_version=args.prompt_version,
         cache_dir=args.cache_dir,
         force_recompute=args.force,
@@ -156,14 +163,16 @@ def command_optimize(args: argparse.Namespace) -> int:
     constraints = AssignmentConstraints.model_validate(config.get("assignment", {}))
     version = config.get("assignment_algorithm", "scipy-milp-0.1.0")
 
-    assignments = optimize_assignments(lessons, styles, scores, constraints, assignment_version=version)
+    assignments = optimize_assignments(
+        lessons, styles, scores, constraints, assignment_version=version
+    )
     report = validate_assignment_batch(assignments, styles, constraints)
     if not report.passed:
         raise AssignmentError(json.dumps(report.model_dump(mode="json"), indent=2))
 
     manifest = AssignmentManifest(
         manifest_version="1.0",
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=datetime.now(UTC).isoformat(),
         assignments=assignments,
         constraints=constraints,
     )
@@ -178,9 +187,17 @@ def command_plan_lyrics(args: argparse.Namespace) -> int:
     llm = create_llm_provider(args.provider, args.model)
     plans = []
     for lesson in lessons:
-        matching = [p for p in profiles if p.lesson_number == lesson.lesson_number]
+        matching = [
+            p
+            for p in profiles
+            if p.lesson_number == lesson.lesson_number and p.language == lesson.language
+        ]
         profile = matching[0] if matching else None
-        archetype = choose_archetype(lesson, profile, llm, args.prompt_version) if profile else "title_teaching_prayer"
+        archetype = (
+            choose_archetype(lesson, profile, llm, args.prompt_version)
+            if profile
+            else "title_teaching_prayer"
+        )
         plan = create_lyric_plan(lesson, archetype, llm, args.prompt_version)
         plans.append(plan)
     dump_json(args.out, plans)
@@ -206,7 +223,11 @@ def command_adapt_styles(args: argparse.Namespace) -> int:
         style = style_by_id.get(match.style_id)
         if not style:
             continue
-        plan_matches = [p for p in plans if p.lesson_number == lesson.lesson_number]
+        plan_matches = [
+            p
+            for p in plans
+            if p.lesson_number == lesson.lesson_number and p.language == lesson.language
+        ]
         plan = plan_matches[0] if plan_matches else None
         adaptation = create_style_adaptation(lesson, style, plan, llm, args.prompt_version)
         adaptations.append(adaptation)
@@ -221,12 +242,12 @@ def command_generate_lyrics(args: argparse.Namespace) -> int:
     adaptations = load_models(args.adaptations, StyleAdaptation)
     llm = create_llm_provider(args.provider, args.model)
 
-    plan_by_lesson = {(p.lesson_number, p.archetype): p for p in plans}
+    plan_by_lesson = {(p.lesson_number, p.language): p for p in plans}
     adapt_by_lesson = {a.lesson_number: a for a in adaptations}
 
     artifacts = []
     for lesson in lessons:
-        plan = plan_by_lesson.get((lesson.lesson_number, lesson.archetype))
+        plan = plan_by_lesson.get((lesson.lesson_number, lesson.language))
         adaptation = adapt_by_lesson.get(lesson.lesson_number)
         if not (plan and adaptation):
             continue
@@ -285,25 +306,27 @@ def command_repair(args: argparse.Namespace) -> int:
             repaired_all.append(artifact)
             continue
         request = create_repair_request(artifact, report)
-        repaired, _, final_report = repair_song(request, lesson, llm, args.prompt_version)
+        repaired, _, _final_report = repair_song(request, lesson, llm, args.prompt_version)
         if repaired:
             repaired_all.append(repaired)
             print(f"  Repaired lesson {artifact.lesson_number}")
         else:
-            failed_all.append(FinalSongArtifact(
-                lesson_number=artifact.lesson_number,
-                title=artifact.title,
-                style_id=artifact.style_id,
-                style_prompt=artifact.style_adaptation.final_prompt,
-                lyrics=artifact.full_lyrics_text,
-                archetype=artifact.archetype.value,
-                lesson_type=artifact.lesson_type.value,
-                source_hash=artifact.source_hash,
-                assignment_version=artifact.assignment_version,
-                generator_version=artifact.generator_version,
-                repair_count=request.retry_count,
-                passed_validation=False,
-            ))
+            failed_all.append(
+                FinalSongArtifact(
+                    lesson_number=artifact.lesson_number,
+                    title=artifact.title,
+                    style_id=artifact.style_id,
+                    style_prompt=artifact.style_adaptation.final_prompt,
+                    lyrics=artifact.full_lyrics_text,
+                    archetype=artifact.archetype.value,
+                    lesson_type=artifact.lesson_type.value,
+                    source_hash=artifact.source_hash,
+                    assignment_version=artifact.assignment_version,
+                    generator_version=artifact.generator_version,
+                    repair_count=request.retry_count,
+                    passed_validation=False,
+                )
+            )
             print(f"  Failed to repair lesson {artifact.lesson_number}")
 
     dump_json(args.out, repaired_all)
@@ -327,7 +350,7 @@ def command_export(args: argparse.Namespace) -> int:
             else:
                 reports.append(ValidationReport(passed=True))
 
-    batch = export_suno_batch(artifacts, reports, output_dir=args.out)
+    export_suno_batch(artifacts, reports, output_dir=args.out)
 
     if args.lesson_folders:
         lessons = load_models(args.lessons, LessonRecord) if lessons_path else []
@@ -344,7 +367,7 @@ def command_export(args: argparse.Namespace) -> int:
 
 
 def command_run_batch(args: argparse.Namespace) -> int:
-    config = load_yaml(args.config)
+    load_yaml(args.config)
     raw_config = load_yaml(args.config)
     pipeline_config = PipelineConfig.model_validate(raw_config.get("project", raw_config))
     assignment_config = AssignmentConstraints.model_validate(raw_config.get("assignment", {}))
@@ -388,24 +411,39 @@ def command_run_batch(args: argparse.Namespace) -> int:
     if args.dry_run:
         print("DRY RUN: Skipping LLM scoring, using mock scores...")
         from .scorer import filter_scores_for_optimizer
+
         mock_scores = [
             CompatibilityScore(
                 lesson_number=l.lesson_number,
                 style_id=s.style_id,
                 total=7.0,
-                dimensions={"theme": 7.0, "energy": 7.0, "density": 7.0, "repetition": 7.0, "clarity": 7.0, "arc": 7.0, "form": 7.0},
+                dimensions={
+                    "theme": 7.0,
+                    "energy": 7.0,
+                    "density": 7.0,
+                    "repetition": 7.0,
+                    "clarity": 7.0,
+                    "arc": 7.0,
+                    "form": 7.0,
+                },
             )
-            for l in lessons for s in styles
+            for l in lessons
+            for s in styles
         ]
         scores = filter_scores_for_optimizer(mock_scores, lessons, styles)
     else:
         print("Computing compatibility scores...")
-        scores = compute_compatibility_scores(lessons, styles, llm, cache_dir=str(output_dir / "scores"))
+        scores = compute_compatibility_scores(
+            lessons, styles, llm, cache_dir=str(output_dir / "scores")
+        )
     print(f"  {len(scores)} scores computed")
 
     print("Running global optimizer...")
     assignments = optimize_assignments(
-        lessons, styles, scores, assignment_config,
+        lessons,
+        styles,
+        scores,
+        assignment_config,
         assignment_version="scipy-milp-0.1.0",
     )
     report = validate_assignment_batch(assignments, styles, assignment_config)
@@ -415,7 +453,7 @@ def command_run_batch(args: argparse.Namespace) -> int:
 
     manifest = AssignmentManifest(
         manifest_version="1.0",
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=datetime.now(UTC).isoformat(),
         assignments=assignments,
         constraints=assignment_config,
     )
@@ -439,7 +477,11 @@ def command_run_batch(args: argparse.Namespace) -> int:
                 continue
             profile_matches = [p for p in profiles if p.lesson_number == lesson.lesson_number]
             profile = profile_matches[0] if profile_matches else None
-            archetype = profile.ranked_archetypes[0] if (profile and profile.ranked_archetypes) else SongArchetype.TITLE_TEACHING_PRAYER
+            archetype = (
+                profile.ranked_archetypes[0]
+                if (profile and profile.ranked_archetypes)
+                else SongArchetype.TITLE_TEACHING_PRAYER
+            )
             plan = create_lyric_plan(lesson, archetype, llm)
             plans.append(plan)
         dump_json(output_dir / "plans.json", plans)
@@ -453,7 +495,11 @@ def command_run_batch(args: argparse.Namespace) -> int:
             style = style_by_id.get(match.style_id)
             if not style:
                 continue
-            plan_matches = [p for p in plans if p.lesson_number == lesson.lesson_number]
+            plan_matches = [
+                p
+                for p in plans
+                if p.lesson_number == lesson.lesson_number and p.language == lesson.language
+            ]
             plan = plan_matches[0] if plan_matches else None
             adaptation = create_style_adaptation(lesson, style, plan, llm)
             adaptations.append(adaptation)
@@ -462,7 +508,11 @@ def command_run_batch(args: argparse.Namespace) -> int:
         print("Generating lyrics...")
         artifacts = []
         for lesson in lessons:
-            plan_matches = [p for p in plans if p.lesson_number == lesson.lesson_number]
+            plan_matches = [
+                p
+                for p in plans
+                if p.lesson_number == lesson.lesson_number and p.language == lesson.language
+            ]
             adapt_matches = [a for a in adaptations if a.lesson_number == lesson.lesson_number]
             plan = plan_matches[0] if plan_matches else None
             adaptation = adapt_matches[0] if adapt_matches else None
@@ -477,7 +527,9 @@ def command_run_batch(args: argparse.Namespace) -> int:
         for art in artifacts:
             lesson = next((l for l in lessons if l.lesson_number == art.lesson_number), None)
             if lesson:
-                reports_list.append(validate_verbatim_lyrics(art.full_lyrics_text, lesson.source_text))
+                reports_list.append(
+                    validate_verbatim_lyrics(art.full_lyrics_text, lesson.source_text)
+                )
             else:
                 reports_list.append(ValidationReport(passed=True))
 
@@ -508,7 +560,9 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--out", default="outputs/styles/raw_styles.json")
     extract.add_argument("--min-lesson", type=int, default=290)
     extract.add_argument("--max-lesson", type=int, default=361)
-    extract.add_argument("--normalize", action="store_true", help="Also normalize and write review queue")
+    extract.add_argument(
+        "--normalize", action="store_true", help="Also normalize and write review queue"
+    )
     extract.set_defaults(handler=command_extract_styles)
 
     # normalize-styles
@@ -520,7 +574,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ingest-sources
     ingest = subparsers.add_parser("ingest-sources")
-    ingest.add_argument("--json", default="/Users/trust/Projects/acim-core-data/workbook_enhanced.json")
+    ingest.add_argument(
+        "--json", default="/Users/trust/Projects/acim-core-data/workbook_enhanced.json"
+    )
     ingest.add_argument("--out", default="outputs/lessons.json")
     ingest.add_argument("--min-lesson", type=int, default=116)
     ingest.add_argument("--max-lesson", type=int, default=199)
@@ -623,7 +679,9 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--config", default="config/pipeline.example.yaml")
     batch.add_argument("--provider", default="mock")
     batch.add_argument("--model")
-    batch.add_argument("--source-json", default="/Users/trust/Projects/acim-core-data/workbook_enhanced.json")
+    batch.add_argument(
+        "--source-json", default="/Users/trust/Projects/acim-core-data/workbook_enhanced.json"
+    )
     batch.add_argument("--csv", default="outputs/acim_playlist/suno_metadata_songs.csv")
     batch.add_argument("--lesson-start", type=int, default=116)
     batch.add_argument("--lesson-end", type=int, default=120)

@@ -3,21 +3,23 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
-import yaml
 from pydantic import BaseModel
 
 from .models import (
     CompatibilityScore,
+    CompatibilityScoreBatch,
     GeneratedLyric,
+    GeneratedLyricsResponse,
     LessonAnalysisProfile,
     LessonRecord,
     LyricPlan,
     PlanSection,
     SongArchetype,
+    SongArchetypeSelection,
     StyleAdaptation,
     StyleRecord,
 )
@@ -53,7 +55,7 @@ def _log_request(
 ) -> None:
     log_dir_path = Path(log_dir)
     log_dir_path.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
     log_file = log_dir_path / f"{provider}_{model}_{timestamp}.json"
     entry = {
         "provider": provider,
@@ -61,7 +63,9 @@ def _log_request(
         "timestamp": timestamp,
         "system_prompt": system_prompt,
         "user_prompt": user_prompt,
-        "response": response.model_dump(mode="json") if isinstance(response, BaseModel) else response,
+        "response": response.model_dump(mode="json")
+        if isinstance(response, BaseModel)
+        else response,
     }
     log_file.write_text(
         json.dumps(entry, indent=2, ensure_ascii=False) + "\n",
@@ -112,14 +116,16 @@ class MockLLMProvider(LLMProvider):
     ) -> T:
         if response_model is LessonAnalysisProfile:
             return self._mock_analysis(user_prompt)
-        if response_model == list[CompatibilityScore]:
-            return self._mock_scores(user_prompt)
+        if response_model is CompatibilityScoreBatch:
+            return CompatibilityScoreBatch(self._mock_scores(user_prompt))
         if response_model is LyricPlan:
             return self._mock_plan(user_prompt)
         if response_model is StyleAdaptation:
             return self._mock_adaptation(user_prompt)
-        if response_model == list[GeneratedLyric]:
-            return self._mock_lyrics(user_prompt)
+        if response_model is GeneratedLyricsResponse:
+            return GeneratedLyricsResponse(self._mock_lyrics(user_prompt))
+        if response_model is SongArchetypeSelection:
+            return SongArchetypeSelection(archetype=SongArchetype.TITLE_TEACHING_PRAYER)
         msg = f"MockLLMProvider does not support response_model={response_model.__name__}"
         raise ValueError(msg)
 
@@ -145,10 +151,11 @@ class MockLLMProvider(LLMProvider):
 
     def _mock_scores(self, user_prompt: str) -> list[CompatibilityScore]:
         import re
+
         lesson_match = re.search(r"Lesson\s+(\d+):", user_prompt)
         lesson_number = int(lesson_match.group(1)) if lesson_match else 116
         style_ids = re.findall(r"style_id=([^\s,]+)", user_prompt)
-        styles_found = sorted(set(sid for sid in style_ids))
+        styles_found = sorted(set(style_ids))
 
         scores = []
         for si, sid in enumerate(styles_found):
@@ -159,8 +166,13 @@ class MockLLMProvider(LLMProvider):
                     style_id=sid,
                     total=round(score, 1),
                     dimensions={
-                        "theme": round(score, 1), "energy": 6.0, "density": 7.0,
-                        "repetition": 5.0, "clarity": 6.5, "arc": 7.0, "form": 6.0,
+                        "theme": round(score, 1),
+                        "energy": 6.0,
+                        "density": 7.0,
+                        "repetition": 5.0,
+                        "clarity": 6.5,
+                        "arc": 7.0,
+                        "form": 6.0,
                     },
                 )
             )
@@ -168,22 +180,47 @@ class MockLLMProvider(LLMProvider):
 
     def _mock_plan(self, user_prompt: str) -> LyricPlan:
         import re
+
         lesson_match = re.search(r"Lesson\s+(\d+):", user_prompt)
         lesson_number = int(lesson_match.group(1)) if lesson_match else 116
         return LyricPlan(
             lesson_number=lesson_number,
             archetype=SongArchetype.TITLE_TEACHING_PRAYER,
             sections=[
-                PlanSection(label="Intro", function="setting", source_sentence_ids=["L116_001"],
-                            treatment="instrumental"),
-                PlanSection(label="Verse 1", function="teaching", source_sentence_ids=["L116_002", "L116_003"],
-                            treatment="sung", repetition_count=1),
-                PlanSection(label="Chorus", function="title_mantra", source_sentence_ids=["L116_001"],
-                            treatment="sung", repetition_count=3),
-                PlanSection(label="Bridge - Guided Practice", function="practice",
-                            source_sentence_ids=["L116_010"], treatment="spoken", repetition_count=1),
-                PlanSection(label="Outro", function="resolution", source_sentence_ids=["L116_001"],
-                            treatment="sung", repetition_count=2),
+                PlanSection(
+                    label="Intro",
+                    function="setting",
+                    source_sentence_ids=["L116_001"],
+                    treatment="instrumental",
+                ),
+                PlanSection(
+                    label="Verse 1",
+                    function="teaching",
+                    source_sentence_ids=["L116_002", "L116_003"],
+                    treatment="sung",
+                    repetition_count=1,
+                ),
+                PlanSection(
+                    label="Chorus",
+                    function="title_mantra",
+                    source_sentence_ids=["L116_001"],
+                    treatment="sung",
+                    repetition_count=3,
+                ),
+                PlanSection(
+                    label="Bridge - Guided Practice",
+                    function="practice",
+                    source_sentence_ids=["L116_010"],
+                    treatment="spoken",
+                    repetition_count=1,
+                ),
+                PlanSection(
+                    label="Outro",
+                    function="resolution",
+                    source_sentence_ids=["L116_001"],
+                    treatment="sung",
+                    repetition_count=2,
+                ),
             ],
             total_word_count=200,
             spoken_word_count=50,
@@ -191,8 +228,9 @@ class MockLLMProvider(LLMProvider):
 
     def _mock_adaptation(self, user_prompt: str) -> StyleAdaptation:
         import re
+
         lesson_match = re.search(r"for Lesson\s+(\d+)|lesson_number=(\d+)", user_prompt)
-        lesson_number = int((lesson_match.group(1) or lesson_match.group(2))) if lesson_match else 116
+        lesson_number = int(lesson_match.group(1) or lesson_match.group(2)) if lesson_match else 116
         style_match = re.search(r"style_id=([^\s,]+)|STYLE_\d+", user_prompt)
         style_id = style_match.group(1) or style_match.group(0) if style_match else "STYLE_1"
         return StyleAdaptation(
@@ -207,19 +245,39 @@ class MockLLMProvider(LLMProvider):
 
     def _mock_lyrics(self, user_prompt: str) -> list[GeneratedLyric]:
         import re
+
         lesson_match = re.search(r"Lesson\s+(\d+):", user_prompt)
-        lesson_number = int(lesson_match.group(1)) if lesson_match else 116
+        int(lesson_match.group(1)) if lesson_match else 116
         source_text = user_prompt
-        sentences_section = source_text.split("Source sentences:")[-1].strip() if "Source sentences:" in source_text else ""
+        sentences_section = (
+            source_text.split("Source sentences:")[-1].strip()
+            if "Source sentences:" in source_text
+            else ""
+        )
         lines = [l.strip() for l in sentences_section.split("\n") if l.strip() and ":" in l]
-        sung_lines = [l.split(":", 1)[1].strip() for l in lines[:3]] if len(lines) >= 3 else ["For morning and evening review."]
-        spoken_lines = [l.split(":", 1)[1].strip() for l in lines[3:6]] if len(lines) >= 6 else ["On the hour:"]
+        sung_lines = (
+            [l.split(":", 1)[1].strip() for l in lines[:3]]
+            if len(lines) >= 3
+            else ["For morning and evening review."]
+        )
+        spoken_lines = (
+            [l.split(":", 1)[1].strip() for l in lines[3:6]]
+            if len(lines) >= 6
+            else ["On the hour:"]
+        )
         return [
             GeneratedLyric(section_label="Intro", text="(Soft instrumental)"),
-            GeneratedLyric(section_label="Verse 1", text=sung_lines[0] if len(sung_lines) > 0 else "This is the day of peace."),
-            GeneratedLyric(section_label="Chorus", text=sung_lines[1] if len(sung_lines) > 1 else sung_lines[0]),
-            GeneratedLyric(section_label="Bridge - Guided Practice",
-                           text=f"(Spoken) {spoken_lines[0]}" if spoken_lines else "(Spoken) Let us review."),
+            GeneratedLyric(
+                section_label="Verse 1",
+                text=sung_lines[0] if len(sung_lines) > 0 else "This is the day of peace.",
+            ),
+            GeneratedLyric(
+                section_label="Chorus", text=sung_lines[1] if len(sung_lines) > 1 else sung_lines[0]
+            ),
+            GeneratedLyric(
+                section_label="Bridge - Guided Practice",
+                text=f"(Spoken) {spoken_lines[0]}" if spoken_lines else "(Spoken) Let us review.",
+            ),
             GeneratedLyric(section_label="Outro", text=sung_lines[-1]),
         ]
 
@@ -250,7 +308,6 @@ class GeminiLLMProvider(LLMProvider):
         if self._client is None:
             self._client = genai.Client()
 
-        schema_dict = _pydantic_to_genai_schema(response_model)
         response = self._client.models.generate_content(
             model=self._model,
             contents=user_prompt,
@@ -259,10 +316,10 @@ class GeminiLLMProvider(LLMProvider):
                 temperature=temperature,
                 seed=seed,
                 response_mime_type="application/json",
-                response_schema=schema_dict,
+                response_schema=response_model,
             ),
         )
-        result = response_model.model_validate(json.loads(response.text))
+        result = response_model.model_validate_json(response.text)
         _log_request("gemini", self._model, system_prompt, user_prompt, result)
         return result
 
@@ -305,25 +362,6 @@ class OpenAILLMProvider(LLMProvider):
         result = response.choices[0].message.parsed
         _log_request("openai", self._model, system_prompt, user_prompt, result)
         return result
-
-
-def _pydantic_to_genai_schema(model: type[BaseModel]) -> dict[str, Any]:
-    schema = model.model_json_schema()
-    _strip_json_schema(schema)
-    return schema
-
-
-def _strip_json_schema(schema: dict[str, Any]) -> None:
-    schema.pop("title", None)
-    schema.pop("$schema", None)
-    schema.pop("$defs", None)
-    for value in schema.values():
-        if isinstance(value, dict):
-            _strip_json_schema(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    _strip_json_schema(item)
 
 
 def create_llm_provider(
@@ -373,7 +411,8 @@ def score_compatibility(
         for s in styles
     )
     user_prompt = f"{lesson_info}\nAvailable styles:\n{styles_info}\n"
-    return llm.generate_structured(system_prompt, user_prompt, list[CompatibilityScore])
+    response = llm.generate_structured(system_prompt, user_prompt, CompatibilityScoreBatch)
+    return response.root
 
 
 def select_archetype(
@@ -390,7 +429,8 @@ def select_archetype(
         f"Ranked archetypes: {[a.value for a in profile.ranked_archetypes]}\n"
         f"Number of paragraphs: {len(lesson.paragraphs)}\n"
     )
-    return llm.generate_structured(system_prompt, user_prompt, SongArchetype)
+    response = llm.generate_structured(system_prompt, user_prompt, SongArchetypeSelection)
+    return response.archetype
 
 
 def plan_lyrics(
@@ -405,11 +445,18 @@ def plan_lyrics(
         f"Archetype: {archetype.value}\n"
         f"Lesson type: {lesson.lesson_type.value}\n\n"
         f"Source text:\n{lesson.source_text}\n\n"
-        f"Sentences:\n" +
-        "\n".join(f"  {s.sentence_id} [{s.category}]: {s.text[:120]}" for s in lesson.sentences) +
-        "\n"
+        f"Sentences:\n"
+        + "\n".join(f"  {s.sentence_id} [{s.category}]: {s.text[:120]}" for s in lesson.sentences)
+        + "\n"
     )
-    return llm.generate_structured(system_prompt, user_prompt, LyricPlan)
+    result = llm.generate_structured(system_prompt, user_prompt, LyricPlan)
+    return result.model_copy(
+        update={
+            "lesson_number": lesson.lesson_number,
+            "language": lesson.language,
+            "archetype": archetype,
+        }
+    )
 
 
 def adapt_style(
@@ -447,14 +494,15 @@ def generate_lyrics(
         f"Generate verbatim-only lyrics for Lesson {lesson.lesson_number}: {lesson.title}\n\n"
         f"Archetype: {plan.archetype.value}\n"
         f"Style: {adaptation.final_prompt}\n\n"
-        f"Plan:\n" +
-        "\n".join(
+        f"Plan:\n"
+        + "\n".join(
             f"  [{s.label}] {s.function} - {s.treatment} x{s.repetition_count} - "
             f"source IDs: {s.source_sentence_ids}"
             for s in plan.sections
-        ) +
-        f"\n\nSource sentences:\n" +
-        "\n".join(f"  {s.sentence_id}: {s.text}" for s in lesson.sentences) +
-        "\n\nProduce lyrics with [Section] headers and (ad-lib) directions."
+        )
+        + "\n\nSource sentences:\n"
+        + "\n".join(f"  {s.sentence_id}: {s.text}" for s in lesson.sentences)
+        + "\n\nProduce lyrics with [Section] headers and (ad-lib) directions."
     )
-    return llm.generate_structured(system_prompt, user_prompt, list[GeneratedLyric])
+    response = llm.generate_structured(system_prompt, user_prompt, GeneratedLyricsResponse)
+    return response.root

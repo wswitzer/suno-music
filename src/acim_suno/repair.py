@@ -18,9 +18,7 @@ def create_repair_request(
 ) -> TargetedRepairRequest:
     failed_fields: list[str] = []
     for issue in report.issues:
-        if issue.code == "non_verbatim_line":
-            failed_fields.append("lyrics")
-        elif issue.code == "no_lyric_content":
+        if issue.code == "non_verbatim_line" or issue.code == "no_lyric_content":
             failed_fields.append("lyrics")
         elif issue.code in ("core_prompt_changed", "final_prompt_missing_core"):
             failed_fields.append("style_adaptation")
@@ -47,24 +45,36 @@ def repair_song(
     prompt_version: str = "0.1.0",
 ) -> tuple[SongArtifact | None, TargetedRepairRequest, ValidationReport]:
     if request.retry_count >= request.max_retries:
-        return None, request, ValidationReport(
-            passed=False,
-            issues=[{
-                "code": "max_retries_exceeded",
-                "message": f"Exceeded {request.max_retries} repair attempts",
-                "severity": "error",
-            }],
+        return (
+            None,
+            request,
+            ValidationReport(
+                passed=False,
+                issues=[
+                    {
+                        "code": "max_retries_exceeded",
+                        "message": f"Exceeded {request.max_retries} repair attempts",
+                        "severity": "error",
+                    }
+                ],
+            ),
         )
 
     artifact = request.current_artifact
     if artifact is None:
-        return None, request, ValidationReport(
-            passed=False,
-            issues=[{"code": "no_artifact", "message": "No artifact to repair", "severity": "error"}],
+        return (
+            None,
+            request,
+            ValidationReport(
+                passed=False,
+                issues=[
+                    {"code": "no_artifact", "message": "No artifact to repair", "severity": "error"}
+                ],
+            ),
         )
 
     needs_lyrics_repair = "lyrics" in request.failed_fields
-    needs_adaptation_repair = any("adaptation" in f for f in request.failed_fields)
+    any("adaptation" in f for f in request.failed_fields)
 
     repaired_lyrics: list[GeneratedLyric] = list(artifact.lyrics)
 
@@ -78,9 +88,9 @@ def repair_song(
             f"Repair lyrics for Lesson {request.lesson_number}.\n"
             f"Errors: {'; '.join(request.error_messages)}\n\n"
             f"Current lyrics:\n{artifact.full_lyrics_text}\n\n"
-            f"Source sentences:\n" +
-            "\n".join(s.text for s in lesson.sentences) +
-            "\n\nReplacement must use contiguous approved source text."
+            f"Source sentences:\n"
+            + "\n".join(s.text for s in lesson.sentences)
+            + "\n\nReplacement must use contiguous approved source text."
         )
         result = llm.generate_structured(system_prompt, user_prompt, list[GeneratedLyric])
         if result:

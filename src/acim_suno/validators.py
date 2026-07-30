@@ -14,7 +14,11 @@ from .models import (
 )
 
 SECTION_LABEL = re.compile(r"^\s*\[[^\]]+\]\s*$")
-FULL_DIRECTION = re.compile(r"^\s*\([^)]*\)\s*$")
+NON_LYRICAL_DIRECTION = re.compile(
+    r"^\s*\((?:soft\s+)?(?:instrumental(?:\s+(?:intro|break|outro))?"
+    r"|music\s+(?:fades?|drops?|swells?)|fade\s+(?:in|out))\)\s*$",
+    re.IGNORECASE,
+)
 BPM_PATTERN = re.compile(r"(?<!\d)(\d{2,3})\s*BPM\b", re.IGNORECASE)
 
 
@@ -32,7 +36,7 @@ def validate_verbatim_lyrics(lyrics: str, source_text: str) -> ValidationReport:
 
     for line_number, raw_line in enumerate(lyrics.splitlines(), start=1):
         line = raw_line.strip()
-        if not line or SECTION_LABEL.fullmatch(line) or FULL_DIRECTION.fullmatch(line):
+        if not line or SECTION_LABEL.fullmatch(line) or NON_LYRICAL_DIRECTION.fullmatch(line):
             continue
         checked_lines += 1
         if normalize_source_text(line) not in normalized_source:
@@ -45,9 +49,7 @@ def validate_verbatim_lyrics(lyrics: str, source_text: str) -> ValidationReport:
             )
 
     if checked_lines == 0:
-        issues.append(
-            ValidationIssue(code="no_lyric_content", message="No lyric lines were found")
-        )
+        issues.append(ValidationIssue(code="no_lyric_content", message="No lyric lines were found"))
 
     return ValidationReport(
         passed=not any(issue.severity == "error" for issue in issues),
@@ -56,14 +58,10 @@ def validate_verbatim_lyrics(lyrics: str, source_text: str) -> ValidationReport:
     )
 
 
-def validate_style_adaptation(
-    adaptation: StyleAdaptation, style: StyleRecord
-) -> ValidationReport:
+def validate_style_adaptation(adaptation: StyleAdaptation, style: StyleRecord) -> ValidationReport:
     issues: list[ValidationIssue] = []
     if adaptation.style_id != style.style_id:
-        issues.append(
-            ValidationIssue(code="style_id_mismatch", message="Wrong style target")
-        )
+        issues.append(ValidationIssue(code="style_id_mismatch", message="Wrong style target"))
     if adaptation.core_prompt != style.core_prompt:
         issues.append(
             ValidationIssue(code="core_prompt_changed", message="Core prompt was modified")

@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 
 
 class StrictModel(BaseModel):
@@ -42,9 +42,9 @@ class SourceMetadata(StrictModel):
     edition: str
     url: str | None = None
     source_hash: str
-    rights_status: Literal[
-        "authorized", "public_domain", "user_supplied", "review_required"
-    ] = "review_required"
+    rights_status: Literal["authorized", "public_domain", "user_supplied", "review_required"] = (
+        "review_required"
+    )
 
 
 class LessonRecord(StrictModel):
@@ -84,9 +84,12 @@ class StyleRecord(StrictModel):
 
     @model_validator(mode="after")
     def validate_tempo_range(self) -> StyleRecord:
-        if self.tempo_min is not None and self.tempo_max is not None:
-            if self.tempo_min > self.tempo_max:
-                raise ValueError("tempo_min cannot exceed tempo_max")
+        if (
+            self.tempo_min is not None
+            and self.tempo_max is not None
+            and self.tempo_min > self.tempo_max
+        ):
+            raise ValueError("tempo_min cannot exceed tempo_max")
         return self
 
 
@@ -104,6 +107,16 @@ class CompatibilityScore(StrictModel):
     dimensions: dict[str, float] = Field(default_factory=dict)
     reason: str | None = None
     risks: list[str] = Field(default_factory=list)
+
+
+class CompatibilityScoreBatch(RootModel[list[CompatibilityScore]]):
+    """Structured-output wrapper for one lesson's style scores."""
+
+
+class SongArchetypeSelection(StrictModel):
+    """Structured-output wrapper for an archetype enum."""
+
+    archetype: SongArchetype
 
 
 class AssignmentConstraints(StrictModel):
@@ -176,6 +189,7 @@ class PlanSection(StrictModel):
 
 class LyricPlan(StrictModel):
     lesson_number: int
+    language: str = "en"
     archetype: SongArchetype
     sections: list[PlanSection]
     total_word_count: int = 0
@@ -185,6 +199,10 @@ class LyricPlan(StrictModel):
 class GeneratedLyric(StrictModel):
     section_label: str
     text: str
+
+
+class GeneratedLyricsResponse(RootModel[list[GeneratedLyric]]):
+    """Structured-output wrapper for generated lyric sections."""
 
 
 class SongArtifact(StrictModel):

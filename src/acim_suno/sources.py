@@ -15,16 +15,38 @@ class SourceProvider(Protocol):
 
 
 class ACIMJsonSourceProvider:
-    def __init__(self, json_path: str | Path) -> None:
+    def __init__(
+        self,
+        json_path: str | Path,
+        *,
+        source_language: str = "en",
+    ) -> None:
         self._path = Path(json_path)
         with self._path.open("r", encoding="utf-8") as f:
             self._data = json.load(f)
+        declared_language = self._declared_language()
+        if declared_language is not None and declared_language != source_language:
+            raise ValueError(
+                f"Source declares language {declared_language!r}, not {source_language!r}"
+            )
+        self._source_language = source_language
         self._source_hash = self._compute_hash()
 
+    def _declared_language(self) -> str | None:
+        for key in ("language", "lang", "source_language"):
+            value = self._data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        metadata = self._data.get("metadata")
+        if isinstance(metadata, dict):
+            for key in ("language", "lang", "source_language"):
+                value = metadata.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
     def _compute_hash(self) -> str:
-        return hashlib.sha256(
-            self._path.read_bytes()
-        ).hexdigest()
+        return hashlib.sha256(self._path.read_bytes()).hexdigest()
 
     def get_source_hash(self) -> str:
         return self._source_hash
@@ -35,9 +57,13 @@ class ACIMJsonSourceProvider:
         end: int = 199,
         language: str = "en",
     ) -> list[LessonRecord]:
+        if language != self._source_language:
+            raise ValueError(
+                f"Source provider is bound to {self._source_language!r}; requested {language!r}"
+            )
         parts = self._data.get("parts", {})
         all_lessons: dict[str, dict] = {}
-        for part_key, part in parts.items():
+        for part in parts.values():
             lesson_dict = part.get("lessons", {})
             for k, v in lesson_dict.items():
                 if k in all_lessons:
@@ -119,8 +145,9 @@ class ACIMJsonSourceProvider:
                         texts.append(para_text)
         return texts
 
-    def _build_sentences(self, raw: dict, lesson_number: int,
-                         paragraph_texts: list[str]) -> list[SourceSentence]:
+    def _build_sentences(
+        self, raw: dict, lesson_number: int, paragraph_texts: list[str]
+    ) -> list[SourceSentence]:
         sentences: list[SourceSentence] = []
         sentence_id_counter = 0
 
@@ -172,7 +199,8 @@ class ACIMJsonSourceProvider:
 def create_source_provider(
     source_type: str = "acim_json",
     json_path: str | Path = "/Users/trust/Projects/acim-core-data/workbook_enhanced.json",
+    source_language: str = "en",
 ) -> ACIMJsonSourceProvider:
     if source_type == "acim_json":
-        return ACIMJsonSourceProvider(json_path)
+        return ACIMJsonSourceProvider(json_path, source_language=source_language)
     raise ValueError(f"Unknown source type: {source_type}")
