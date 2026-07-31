@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Protocol
 
@@ -196,11 +197,165 @@ class ACIMJsonSourceProvider:
         return sentences
 
 
+DUMMY_VECTOR = [0.01] * 768
+
+
+def _pinecone_push_sentence(
+    sentences: list[SourceSentence],
+    counter: list[int],
+    text: str,
+    category: str,
+    lesson_num: int,
+) -> None:
+    text = text.strip()
+    if text:
+        counter[0] += 1
+        sentences.append(
+            SourceSentence(
+                sentence_id=f"L{lesson_num}_{counter[0]:03d}",
+                text=text,
+                category=category,
+            )
+        )
+
+
+class PineconeSourceProvider:
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        host: str = "https://acim-text-e2xpwpt.svc.aped-4627-b74a.pinecone.io",
+        source_language: str = "en",
+    ) -> None:
+        self._api_key = api_key or os.environ.get("PINECONE_API_KEY", "")
+        if not self._api_key:
+            raise ValueError("PINECONE_API_KEY required")
+        self._host = host
+        self._source_language = source_language
+        self._source_hash = hashlib.sha256(f"pinecone:{host}:{source_language}".encode()).hexdigest()
+
+    def get_source_hash(self) -> str:
+        return self._source_hash
+
+    def fetch_lessons(
+        self,
+        start: int = 116,
+        end: int = 199,
+        language: str = "en",
+    ) -> list[LessonRecord]:
+        if language != self._source_language:
+            raise ValueError(
+                f"Source provider is bound to {self._source_language!r}; requested {language!r}"
+            )
+
+        import urllib.request
+
+        lessons_map: dict[int, dict[str, object]] = {}
+
+        for num in range(start, end + 1):
+            payload = {
+                "namespace": "workbook",
+                "vector": DUMMY_VECTOR,
+                "topK": 100,
+                "filter": {"lesson": {"$eq": num}},
+                "includeMetadata": True,
+            }
+            req = urllib.request.Request(
+                f"{self._host}/query",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Api-Key": self._api_key, "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    result = json.loads(resp.read().decode())
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    continue
+                raise
+
+            matches = result.get("matches", [])
+            if not matches:
+                continue
+
+            paragraphs_raw: list[dict[str, str]] = []
+            title = f"Lesson {num}"
+            for m in matches:
+                meta = m.get("metadata", {})
+                ref = meta.get("reference", "")
+                text = meta.get("text", "")
+                if text:
+                    paragraphs_raw.append({"reference": ref, "text": text, "metadata": meta})
+                stored_title = meta.get("title", "")
+                if stored_title and len(str(stored_title)) > len(str(title)):
+                    title = str(stored_title)
+
+            lesson_data: dict[str, object] = {
+                "title": title,
+                "paragraphs": paragraphs_raw,
+            }
+            lessons_map[num] = lesson_data
+
+        records: list[LessonRecord] = []
+        for lesson_num in sorted(lessons_map):
+            data = lessons_map[lesson_num]
+            title = str(data["title"])
+            paragraphs_raw = data["paragraphs"]
+            paragraph_texts: list[str] = []
+            sentences: list[SourceSentence] = []
+            sc = [0]
+
+            if title:
+                _pinecone_push_sentence(sentences, sc, title, "title", lesson_num)
+
+            for para in paragraphs_raw:
+                text = para.get("text", "")
+                if text:
+                    paragraph_texts.append(text)
+                    _pinecone_push_sentence(sentences, sc, text, "teaching", lesson_num)
+
+            is_review = lesson_num in range(101, 110) or lesson_num in range(116, 120) or lesson_num in range(126, 130) or lesson_num in range(136, 140) or lesson_num in range(146, 150) or lesson_num in range(156, 160) or lesson_num in range(166, 170) or lesson_num in range(176, 180) or lesson_num in range(186, 190) or lesson_num in range(196, 200)
+            is_experiential = (
+                "stillness" in title.lower()
+                or "quiet" in title.lower()
+                or "meditation" in title.lower()
+            )
+
+            if is_review:
+                lesson_type = LessonType.REVIEW
+            elif is_experiential:
+                lesson_type = LessonType.EXPERIENTIAL
+            else:
+                lesson_type = LessonType.STANDARD
+
+            records.append(
+                LessonRecord(
+                    lesson_number=lesson_num,
+                    language=language,
+                    title=title,
+                    lesson_type=lesson_type,
+                    source=SourceMetadata(
+                        edition=f"pinecone-acim-text-{self._host}",
+                        url=f"{self._host}/query",
+                        source_hash=self._source_hash,
+                        rights_status="review_required",
+                    ),
+                    sentences=sentences,
+                    paragraphs=paragraph_texts,
+                )
+            )
+
+        return records
+
+
 def create_source_provider(
-    source_type: str = "acim_json",
-    json_path: str | Path = "/Users/trust/Projects/acim-core-data/workbook_enhanced.json",
+    source_type: str = "pinecone",
+    json_path: str | Path | None = None,
     source_language: str = "en",
-) -> ACIMJsonSourceProvider:
+) -> ACIMJsonSourceProvider | PineconeSourceProvider:
+    if source_type == "pinecone":
+        return PineconeSourceProvider(source_language=source_language)
     if source_type == "acim_json":
+        if json_path is None:
+            raise ValueError("json_path is required for acim_json source type")
         return ACIMJsonSourceProvider(json_path, source_language=source_language)
     raise ValueError(f"Unknown source type: {source_type}")

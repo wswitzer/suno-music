@@ -49,6 +49,18 @@ See `docs/agents/git-workflow.md` for full conventions. TL;DR:
 
 The Lesson 338 title-mantra / spoken-teaching / prayer structure is one archetype, not the universal form. Review lessons must preserve both reviewed ideas. Lessons centered on stillness or experience should be allowed to use fewer words and more musical space.
 
+## Source data access
+
+ACIM lesson text is stored in a Pinecone vector database. Reference `vector_database.md` in the `acim-core-data` project for full API specs (index host, namespace schema, metadata filter queries, embedding model). The key details for this project:
+
+- **Index:** `acim-text` (host: `https://acim-text-e2xpwpt.svc.aped-4627-b74a.pinecone.io`)
+- **Namespace:** `workbook` (1,833 vectors, one per paragraph per lesson)
+- **Filter by:** `{"lesson": {"$eq": <number>}}` with a dummy 768d vector
+- **API key:** `PINECONE_API_KEY` environment variable
+- Source provider: `PineconeSourceProvider` in `src/acim_suno/sources.py`
+
+Do not hardcode machine-specific file paths. Use Pinecone (env var API key) or require the path as a CLI argument.
+
 ## Public-repository caution
 
 Do not commit copyrighted lesson text, API keys, or private datasets. Keep source-edition metadata, source hashes, and rights status in every generated artifact.
