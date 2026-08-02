@@ -17,6 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+gemini = ["google-genai>=1.0"]
+openai = ["openai>=1.0"]
 
 [project.scripts]
 acim-suno = "acim_suno.cli:main"
