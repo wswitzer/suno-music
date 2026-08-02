@@ -13,38 +13,26 @@ from .models import (
     ValidationReport,
 )
 
-SECTION_LABEL = re.compile(r"^\s*\[{1,2}[^\]]+\]{1,2}\s*$")
+SECTION_LABEL = re.compile(r"^\s*(?:\[[^\[\]]+\]|\[\[[^\[\]]+\]\])\s*$")
 NON_LYRICAL_DIRECTION = re.compile(
     r"^\s*\((?:soft\s+)?(?:instrumental(?:\s+(?:intro|break|outro))?"
-    r"|music\s+(?:fades?|drops?|swells?)|fade\s+(?:in|out))\)\s*$",
+    r"|music\s+(?:fades?|drops?|swells?)|fade\s+(?:in|out)|ad-?lib|spoken|sung)\)\s*$",
     re.IGNORECASE,
 )
 AD_LIB = re.compile(r"^\s*\((.*)\)\s*$", re.DOTALL)
 TREATMENT_MARKER = re.compile(r"^\s*\((?:spoken|sung)\)\s*(?::\s*)?", re.IGNORECASE)
 BPM_PATTERN = re.compile(r"(?<!\d)(\d{2,3})\s*BPM\b", re.IGNORECASE)
-EDITORIAL_MARKER = re.compile(
-    r"\s*W-pI\.[0-9]+\.[0-9]+\.|\s*\(\d+\)|\s\d+\s+(?=[A-Z])"
-)
+EDITORIAL_REFERENCE = re.compile(r"\bW-pI\.\d+(?:\.\d+)+\.?")
+LEADING_EDITORIAL_NUMBER = re.compile(r"(?m)^\s*(?:\(\d+\)|\d+\.?)\s+(?=[A-Z])")
 
 
 def normalize_source_text(value: str) -> str:
     value = unicodedata.normalize("NFKC", value)
     value = value.replace("—", "-").replace("–", "-")
-    value = EDITORIAL_MARKER.sub(" ", value)
+    value = EDITORIAL_REFERENCE.sub(" ", value)
+    value = LEADING_EDITORIAL_NUMBER.sub(" ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip().casefold()
-
-
-def _match_positions(source: str, chunk: str) -> list[int]:
-    positions: list[int] = []
-    start = 0
-    while True:
-        idx = source.find(chunk, start)
-        if idx == -1:
-            break
-        positions.append(idx)
-        start = idx + 1
-    return positions
 
 
 def _is_verbatim_line(norm_line: str, norm_source: str) -> bool:
@@ -52,42 +40,19 @@ def _is_verbatim_line(norm_line: str, norm_source: str) -> bool:
         return False
     if norm_line in norm_source:
         return True
-    n = len(norm_line)
-    words = norm_line.split()
-    if words:
-        for count in range(2, len(words) + 1):
-            if len(words) % count:
-                continue
-            unit_words = words[: len(words) // count]
-            if unit_words * count == words:
-                unit = " ".join(unit_words)
-                if unit in norm_source:
-                    return True
 
-    position = 0
-    previous_start = -1
-    previous_end = -1
-    while position < n:
-        matched = False
-        for end in range(n, position, -1):
-            chunk = norm_line[position:end]
-            positions = _match_positions(norm_source, chunk)
-            candidates = [
-                p
-                for p in positions
-                if previous_start == -1
-                or p == previous_end
-                or p + len(chunk) == previous_start
-            ]
-            if candidates:
-                position = end
-                previous_start = candidates[0]
-                previous_end = candidates[0] + len(chunk)
-                matched = True
-                break
-        if not matched:
-            return False
-    return True
+    words = norm_line.split()
+    for unit_length in range(1, (len(words) // 2) + 1):
+        if len(words) % unit_length:
+            continue
+        unit_words = words[:unit_length]
+        repeat_count = len(words) // unit_length
+        if repeat_count < 2 or unit_words * repeat_count != words:
+            continue
+        unit = " ".join(unit_words)
+        if unit in norm_source:
+            return True
+    return False
 
 
 def validate_verbatim_lyrics(lyrics: str, source_text: str) -> ValidationReport:
@@ -99,12 +64,14 @@ def validate_verbatim_lyrics(lyrics: str, source_text: str) -> ValidationReport:
         line = raw_line.strip()
         if not line or SECTION_LABEL.fullmatch(line) or NON_LYRICAL_DIRECTION.fullmatch(line):
             continue
-        checked_lines += 1
         ad_lib = AD_LIB.fullmatch(line)
         if ad_lib:
             line = ad_lib.group(1).strip()
         else:
             line = TREATMENT_MARKER.sub("", line).strip()
+        if not line:
+            continue
+        checked_lines += 1
         if not _is_verbatim_line(normalize_source_text(line), normalized_source):
             issues.append(
                 ValidationIssue(

@@ -120,7 +120,9 @@ def command_ingest_sources(args: argparse.Namespace) -> int:
             raise ValueError("--json is required for acim_json source type")
         provider = ACIMJsonSourceProvider(args.json, source_language=args.language)
     else:
-        provider = create_source_provider(source_type=args.source_type, source_language=args.language)
+        provider = create_source_provider(
+            source_type=args.source_type, source_language=args.language
+        )
     lessons = provider.fetch_lessons(args.min_lesson, args.max_lesson)
     dump_json(args.out, lessons)
     print(f"Ingested {len(lessons)} lessons to {args.out}")
@@ -142,6 +144,7 @@ def command_analyze_lessons(args: argparse.Namespace) -> int:
 def command_score_compatibility(args: argparse.Namespace) -> int:
     lessons = load_models(args.lessons, LessonRecord)
     styles = load_models(args.styles, StyleRecord)
+    profiles = load_models(args.profiles, LessonAnalysisProfile) if args.profiles else None
     llm = create_llm_provider(args.provider, args.model)
     scores = compute_compatibility_scores(
         lessons,
@@ -150,6 +153,7 @@ def command_score_compatibility(args: argparse.Namespace) -> int:
         prompt_version=args.prompt_version,
         cache_dir=args.cache_dir,
         force_recompute=args.force,
+        profiles=profiles,
     )
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -445,7 +449,11 @@ def command_run_batch(args: argparse.Namespace) -> int:
     else:
         print("Computing compatibility scores...")
         scores = compute_compatibility_scores(
-            lessons, styles, llm, cache_dir=str(output_dir / "scores")
+            lessons,
+            styles,
+            llm,
+            cache_dir=str(output_dir / "scores"),
+            profiles=profiles,
         )
     print(f"  {len(scores)} scores computed")
 
@@ -486,11 +494,18 @@ def command_run_batch(args: argparse.Namespace) -> int:
             match = assign_by_lesson.get((lesson.lesson_number, lesson.language))
             if not match:
                 continue
-            profile_matches = [p for p in profiles if p.lesson_number == lesson.lesson_number]
+            profile_matches = [
+                profile
+                for profile in profiles
+                if profile.lesson_number == lesson.lesson_number
+                and profile.language == lesson.language
+            ]
             profile = profile_matches[0] if profile_matches else None
             archetype = (
-                profile.ranked_archetypes[0]
-                if (profile and profile.ranked_archetypes)
+                choose_archetype(lesson, profile, llm)
+                if profile is not None
+                else SongArchetype.PAIRED_REVIEW
+                if lesson.lesson_type.value == "review"
                 else SongArchetype.TITLE_TEACHING_PRAYER
             )
             plan = create_lyric_plan(lesson, archetype, llm)
@@ -585,8 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ingest-sources
     ingest = subparsers.add_parser("ingest-sources")
-    ingest.add_argument("--source-type", default="pinecone",
-                        choices=["pinecone", "acim_json"])
+    ingest.add_argument("--source-type", default="pinecone", choices=["pinecone", "acim_json"])
     ingest.add_argument("--json", help="Path to ACIM JSON file (required for acim_json source)")
     ingest.add_argument("--language", default="en")
     ingest.add_argument("--out", default="outputs/lessons.json")
@@ -607,6 +621,7 @@ def build_parser() -> argparse.ArgumentParser:
     score = subparsers.add_parser("score-compatibility")
     score.add_argument("--lessons", required=True)
     score.add_argument("--styles", required=True)
+    score.add_argument("--profiles", help="Optional lesson-analysis profiles JSON")
     score.add_argument("--out", default="outputs/scores/compatibility.jsonl")
     score.add_argument("--cache-dir", default="outputs/scores")
     score.add_argument("--provider", default="mock")
@@ -691,8 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--config", default="config/pipeline.example.yaml")
     batch.add_argument("--provider", default="mock")
     batch.add_argument("--model")
-    batch.add_argument("--source-type", default="pinecone",
-                        choices=["pinecone", "acim_json"])
+    batch.add_argument("--source-type", default="pinecone", choices=["pinecone", "acim_json"])
     batch.add_argument("--source-json", help="Path to ACIM JSON file (required for acim_json)")
     batch.add_argument("--language", default="en")
     batch.add_argument("--csv", default="outputs/acim_playlist/suno_metadata_songs.csv")

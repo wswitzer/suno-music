@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Protocol
 
@@ -91,7 +92,7 @@ class ACIMJsonSourceProvider:
 
             reviewed = raw.get("reviewed_lessons")
 
-            is_review = reviewed is not None and len(paragraphs) <= 3
+            is_review = _is_review_lesson(num) or reviewed is not None
             is_experiential = (
                 "stillness" in title.lower()
                 or "quiet" in title.lower()
@@ -197,6 +198,54 @@ class ACIMJsonSourceProvider:
         return sentences
 
 
+REVIEW_LESSON_RANGES = ((111, 120), (141, 150), (171, 180))
+
+
+def _is_review_lesson(lesson_number: int) -> bool:
+    return any(start <= lesson_number <= end for start, end in REVIEW_LESSON_RANGES)
+
+
+def _reference_sort_key(reference: str) -> tuple[int, tuple[int, ...], str]:
+    numbers = tuple(int(value) for value in re.findall(r"\d+", reference))
+    return (0 if numbers else 1, numbers, reference.casefold())
+
+
+def _ordered_pinecone_paragraphs(
+    paragraphs: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    return sorted(
+        paragraphs,
+        key=lambda item: _reference_sort_key(str(item.get("reference", ""))),
+    )
+
+
+def _pinecone_lesson_hash(
+    lesson_number: int,
+    language: str,
+    title: str,
+    paragraphs: list[dict[str, object]],
+) -> str:
+    payload = {
+        "lesson_number": lesson_number,
+        "language": language,
+        "title": title,
+        "paragraphs": [
+            {
+                "reference": str(item.get("reference", "")),
+                "text": str(item.get("text", "")),
+            }
+            for item in paragraphs
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 DUMMY_VECTOR = [0.01] * 768
 
 
@@ -232,10 +281,13 @@ class PineconeSourceProvider:
             raise ValueError("PINECONE_API_KEY required")
         self._host = host
         self._source_language = source_language
-        self._source_hash = hashlib.sha256(f"pinecone:{host}:{source_language}".encode()).hexdigest()
+        self._provider_hash = hashlib.sha256(
+            f"pinecone:{host}:{source_language}".encode()
+        ).hexdigest()
 
     def get_source_hash(self) -> str:
-        return self._source_hash
+        """Return provider identity; individual lessons carry content hashes."""
+        return self._provider_hash
 
     def fetch_lessons(
         self,
@@ -248,6 +300,7 @@ class PineconeSourceProvider:
                 f"Source provider is bound to {self._source_language!r}; requested {language!r}"
             )
 
+        import urllib.error
         import urllib.request
 
         lessons_map: dict[int, dict[str, object]] = {}
@@ -277,56 +330,70 @@ class PineconeSourceProvider:
             if not matches:
                 continue
 
-            paragraphs_raw: list[dict[str, str]] = []
+            paragraphs_raw: list[dict[str, object]] = []
             title = f"Lesson {num}"
-            for m in matches:
-                meta = m.get("metadata", {})
+            for match in matches:
+                meta = match.get("metadata", {})
                 ref = meta.get("reference", "")
-                text = meta.get("text", "")
-                if text:
-                    paragraphs_raw.append({"reference": ref, "text": text, "metadata": meta})
+                paragraph_text = meta.get("text", "")
+                if paragraph_text:
+                    paragraphs_raw.append(
+                        {"reference": ref, "text": paragraph_text, "metadata": meta}
+                    )
                 stored_title = meta.get("title", "")
                 if stored_title and len(str(stored_title)) > len(str(title)):
                     title = str(stored_title)
 
-            lesson_data: dict[str, object] = {
+            paragraphs_raw = _ordered_pinecone_paragraphs(paragraphs_raw)
+            lessons_map[num] = {
                 "title": title,
                 "paragraphs": paragraphs_raw,
             }
-            lessons_map[num] = lesson_data
+
+        missing = [num for num in range(start, end + 1) if num not in lessons_map]
+        if missing:
+            preview = ", ".join(str(num) for num in missing[:10])
+            raise ValueError(
+                f"Pinecone source is missing {len(missing)} requested lesson(s): {preview}"
+            )
 
         records: list[LessonRecord] = []
         for lesson_num in sorted(lessons_map):
             data = lessons_map[lesson_num]
             title = str(data["title"])
             paragraphs_raw = data["paragraphs"]
+            if not isinstance(paragraphs_raw, list):
+                raise TypeError(f"Invalid Pinecone paragraphs for lesson {lesson_num}")
+
             paragraph_texts: list[str] = []
             sentences: list[SourceSentence] = []
-            sc = [0]
+            sentence_counter = [0]
 
             if title:
-                _pinecone_push_sentence(sentences, sc, title, "title", lesson_num)
+                _pinecone_push_sentence(sentences, sentence_counter, title, "title", lesson_num)
 
-            for para in paragraphs_raw:
-                text = para.get("text", "")
-                if text:
-                    paragraph_texts.append(text)
-                    _pinecone_push_sentence(sentences, sc, text, "teaching", lesson_num)
+            for paragraph in paragraphs_raw:
+                if not isinstance(paragraph, dict):
+                    continue
+                paragraph_text = str(paragraph.get("text", ""))
+                if paragraph_text:
+                    paragraph_texts.append(paragraph_text)
+                    _pinecone_push_sentence(
+                        sentences,
+                        sentence_counter,
+                        paragraph_text,
+                        "teaching",
+                        lesson_num,
+                    )
 
-            is_review = lesson_num in range(101, 110) or lesson_num in range(116, 120) or lesson_num in range(126, 130) or lesson_num in range(136, 140) or lesson_num in range(146, 150) or lesson_num in range(156, 160) or lesson_num in range(166, 170) or lesson_num in range(176, 180) or lesson_num in range(186, 190) or lesson_num in range(196, 200)
-            is_experiential = (
-                "stillness" in title.lower()
-                or "quiet" in title.lower()
-                or "meditation" in title.lower()
-            )
-
-            if is_review:
+            if _is_review_lesson(lesson_num):
                 lesson_type = LessonType.REVIEW
-            elif is_experiential:
+            elif any(marker in title.lower() for marker in ("stillness", "quiet", "meditation")):
                 lesson_type = LessonType.EXPERIENTIAL
             else:
                 lesson_type = LessonType.STANDARD
 
+            lesson_source_hash = _pinecone_lesson_hash(lesson_num, language, title, paragraphs_raw)
             records.append(
                 LessonRecord(
                     lesson_number=lesson_num,
@@ -336,7 +403,7 @@ class PineconeSourceProvider:
                     source=SourceMetadata(
                         edition=f"pinecone-acim-text-{self._host}",
                         url=f"{self._host}/query",
-                        source_hash=self._source_hash,
+                        source_hash=lesson_source_hash,
                         rights_status="review_required",
                     ),
                     sentences=sentences,

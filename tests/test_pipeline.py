@@ -26,7 +26,13 @@ from acim_suno.models import (
     StyleRecord,
 )
 from acim_suno.optimizer import optimize_assignments
-from acim_suno.sources import ACIMJsonSourceProvider
+from acim_suno.planner import choose_archetype
+from acim_suno.sources import (
+    ACIMJsonSourceProvider,
+    _is_review_lesson,
+    _ordered_pinecone_paragraphs,
+    _pinecone_lesson_hash,
+)
 from acim_suno.validators import (
     validate_assignment_batch,
     validate_style_adaptation,
@@ -228,3 +234,105 @@ def test_staged_generate_lyrics_command_uses_plan_language(tmp_path: Path) -> No
     )
     assert result == 0
     assert output_path.exists()
+
+
+def test_review_lesson_ranges_match_workbook_reviews() -> None:
+    assert _is_review_lesson(116)
+    assert _is_review_lesson(120)
+    assert not _is_review_lesson(121)
+    assert not _is_review_lesson(140)
+    assert _is_review_lesson(141)
+    assert _is_review_lesson(150)
+    assert not _is_review_lesson(151)
+    assert _is_review_lesson(171)
+    assert _is_review_lesson(180)
+    assert not _is_review_lesson(181)
+
+
+def test_pinecone_paragraphs_are_sorted_by_reference_and_hash_content() -> None:
+    paragraphs = [
+        {"reference": "W-pI.116.3", "text": "Third"},
+        {"reference": "W-pI.116.1", "text": "First"},
+        {"reference": "W-pI.116.2", "text": "Second"},
+    ]
+    ordered = _ordered_pinecone_paragraphs(paragraphs)
+    assert [item["text"] for item in ordered] == ["First", "Second", "Third"]
+    first_hash = _pinecone_lesson_hash(116, "en", "Title", ordered)
+    changed = [dict(item) for item in ordered]
+    changed[1]["text"] = "Changed"
+    second_hash = _pinecone_lesson_hash(116, "en", "Title", changed)
+    assert first_hash != second_hash
+
+
+def test_verbatim_validator_rejects_reordered_source_words_but_allows_repetition() -> None:
+    assert not validate_verbatim_lyrics("world hello", "hello world").passed
+    assert validate_verbatim_lyrics("I am safe. I am safe.", "I am safe.").passed
+
+
+def test_review_lessons_force_paired_review_archetype() -> None:
+    item = lesson(116).model_copy(update={"lesson_type": "review"})
+    profile = LessonAnalysisProfile(
+        lesson_number=116,
+        lesson_type="review",
+        ranked_archetypes=[SongArchetype.TITLE_TEACHING_PRAYER],
+    )
+    assert choose_archetype(item, profile, MockLLMProvider()) is SongArchetype.PAIRED_REVIEW
+
+
+class CapturingScoreProvider(MockLLMProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_prompt = ""
+
+    def generate_structured(
+        self, system_prompt, user_prompt, response_model, temperature=0.0, seed=None
+    ):
+        self.last_prompt = user_prompt
+        return super().generate_structured(
+            system_prompt, user_prompt, response_model, temperature, seed
+        )
+
+
+def test_compatibility_scoring_uses_lesson_profile() -> None:
+    provider = CapturingScoreProvider()
+    item = lesson(121)
+    profile = LessonAnalysisProfile(
+        lesson_number=121,
+        lesson_type="standard",
+        themes=["forgiveness", "release"],
+        emotional_start="fear",
+        emotional_destination="peace",
+        energy_target=0.7,
+    )
+    style = StyleRecord(style_id="A", name="A", core_prompt="Acoustic")
+    score_compatibility(item, [style], provider, profile=profile, max_attempts=1)
+    assert "forgiveness" in provider.last_prompt
+    assert "fear -> peace" in provider.last_prompt
+    assert "Source excerpt" in provider.last_prompt
+
+
+class DuplicateScoreProvider(MockLLMProvider):
+    def generate_structured(
+        self, system_prompt, user_prompt, response_model, temperature=0.0, seed=None
+    ):
+        if response_model is CompatibilityScoreBatch:
+            return CompatibilityScoreBatch(
+                [
+                    CompatibilityScore(lesson_number=121, style_id="A", total=8),
+                    CompatibilityScore(lesson_number=121, style_id="A", total=7),
+                    CompatibilityScore(lesson_number=121, style_id="B", total=6),
+                ]
+            )
+        return super().generate_structured(
+            system_prompt, user_prompt, response_model, temperature, seed
+        )
+
+
+def test_compatibility_scoring_rejects_duplicate_style_records() -> None:
+    item = lesson(121)
+    styles = [
+        StyleRecord(style_id="A", name="A", core_prompt="A"),
+        StyleRecord(style_id="B", name="B", core_prompt="B"),
+    ]
+    with pytest.raises(ValueError, match="Compatibility scoring failed"):
+        score_compatibility(item, styles, DuplicateScoreProvider(), max_attempts=1)

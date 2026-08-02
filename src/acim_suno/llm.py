@@ -315,9 +315,7 @@ class GeminiLLMProvider(LLMProvider):
 
         if self._client is None:
             if not self._project:
-                raise ValueError(
-                    "GOOGLE_CLOUD_PROJECT is required for Gemini Vertex AI access"
-                )
+                raise ValueError("GOOGLE_CLOUD_PROJECT is required for Gemini Vertex AI access")
             self._client = Client(
                 vertexai=True,
                 project=self._project,
@@ -405,7 +403,16 @@ def analyze_lesson(
         f"Source text:\n{lesson.source_text}\n\n"
         f"Lesson type: {lesson.lesson_type.value}\n"
     )
-    return llm.generate_structured(system_prompt, user_prompt, LessonAnalysisProfile)
+    result = llm.generate_structured(system_prompt, user_prompt, LessonAnalysisProfile)
+    return result.model_copy(
+        update={
+            "lesson_number": lesson.lesson_number,
+            "language": lesson.language,
+            "lesson_type": lesson.lesson_type,
+            "analyzed_source_hash": lesson.source.source_hash,
+            "analysis_version": prompt_version,
+        }
+    )
 
 
 def score_compatibility(
@@ -414,46 +421,94 @@ def score_compatibility(
     llm: LLMProvider,
     prompt_version: str = "0.1.0",
     max_attempts: int = 3,
+    profile: LessonAnalysisProfile | None = None,
 ) -> list[CompatibilityScore]:
+    from collections import Counter
+
     system_prompt = _load_prompt_section("compatibility scorer")
+    expected_ids = {style.style_id for style in styles}
+    if len(expected_ids) != len(styles):
+        raise ValueError("Style registry contains duplicate style IDs")
+
+    profile_info = "No lesson-analysis profile supplied."
+    if profile is not None:
+        profile_info = (
+            f"Themes: {', '.join(profile.themes) or 'none'}\n"
+            f"Emotional arc: {profile.emotional_start} -> "
+            f"{profile.emotional_destination}\n"
+            f"Energy target: {profile.energy_target}\n"
+            f"Lyric density: {profile.lyric_density}\n"
+            f"Repetition affinity: {profile.repetition_affinity}\n"
+            f"Spoken-word need: {profile.spoken_word_need}\n"
+            f"Clarity requirement: {profile.clarity_requirement}\n"
+            f"Preferred arc: {profile.preferred_arc}\n"
+            f"Suitable traits: {profile.suitable_traits}\n"
+            f"Unsuitable traits: {profile.unsuitable_traits}"
+        )
+
     lesson_info = (
         f"Lesson {lesson.lesson_number}:\n"
         f"Title: {lesson.title}\n"
         f"Type: {lesson.lesson_type.value}\n"
-        f"Themes: {', '.join(getattr(lesson, 'themes', ['unknown']))}\n"
+        f"Language: {lesson.language}\n"
+        f"Lesson analysis:\n{profile_info}\n"
+        f"Source excerpt:\n{lesson.source_text[:2500]}\n"
     )
     styles_info = "\n".join(
-        f"style_id={s.style_id}, name={s.name}, bucket={s.primary_bucket}, "
-        f"energy={s.energy}, density={s.lyric_density}, prompt={s.core_prompt[:100]}"
-        for s in styles
+        f"style_id={style.style_id}, name={style.name}, "
+        f"bucket={style.primary_bucket}, energy={style.energy}, "
+        f"density={style.lyric_density}, prompt={style.core_prompt[:100]}"
+        for style in styles
     )
-    expected_ids = {s.style_id for s in styles}
     user_prompt = (
         f"{lesson_info}\nAvailable styles ({len(styles)} total):\n{styles_info}\n"
-        f"\nReturn exactly {len(styles)} score records, one per style_id listed above."
+        f"\nReturn exactly {len(styles)} score records, one per style_id listed above. "
+        "Do not add unknown IDs or duplicate IDs."
     )
+
     last_error: str | None = None
     for attempt in range(1, max_attempts + 1):
         response = llm.generate_structured(system_prompt, user_prompt, CompatibilityScoreBatch)
         scores = [
-            score.model_copy(update={"language": lesson.language}) for score in response.root
+            score.model_copy(
+                update={
+                    "lesson_number": lesson.lesson_number,
+                    "language": lesson.language,
+                }
+            )
+            for score in response.root
         ]
-        returned_ids = {r.style_id for r in scores}
+        counts = Counter(score.style_id for score in scores)
+        returned_ids = set(counts)
         missing = sorted(expected_ids - returned_ids)
-        if not missing:
+        unexpected = sorted(returned_ids - expected_ids)
+        duplicates = sorted(style_id for style_id, count in counts.items() if count != 1)
+        valid = len(scores) == len(styles) and returned_ids == expected_ids and not duplicates
+        if valid:
             return scores
-        last_error = f"missing {len(missing)} score(s): {', '.join(missing[:5])}"
+
+        details: list[str] = []
+        if len(scores) != len(styles):
+            details.append(f"count {len(scores)} != {len(styles)}")
+        if missing:
+            details.append(f"missing: {', '.join(missing[:5])}")
+        if unexpected:
+            details.append(f"unexpected: {', '.join(unexpected[:5])}")
+        if duplicates:
+            details.append(f"duplicates: {', '.join(duplicates[:5])}")
+        last_error = "; ".join(details) or "invalid score batch"
         logger.warning(
-            "Compatibility score batch incomplete (attempt %d/%d): %s",
+            "Compatibility score batch invalid (attempt %d/%d): %s",
             attempt,
             max_attempts,
             last_error,
         )
         if attempt < max_attempts:
             user_prompt += (
-                f"\n\nPrevious attempt omitted scores for: {', '.join(missing[:10])}. "
-                f"Return records for EVERY one of the {len(styles)} style IDs."
+                f"\n\nPrevious attempt was invalid: {last_error}. "
+                f"Return exactly one record for every one of the {len(styles)} expected IDs."
             )
+
     raise ValueError(
         f"Compatibility scoring failed for lesson {lesson.lesson_number} after "
         f"{max_attempts} attempts: {last_error}"
