@@ -13,20 +13,81 @@ from .models import (
     ValidationReport,
 )
 
-SECTION_LABEL = re.compile(r"^\s*\[[^\]]+\]\s*$")
+SECTION_LABEL = re.compile(r"^\s*\[{1,2}[^\]]+\]{1,2}\s*$")
 NON_LYRICAL_DIRECTION = re.compile(
     r"^\s*\((?:soft\s+)?(?:instrumental(?:\s+(?:intro|break|outro))?"
     r"|music\s+(?:fades?|drops?|swells?)|fade\s+(?:in|out))\)\s*$",
     re.IGNORECASE,
 )
+AD_LIB = re.compile(r"^\s*\((.*)\)\s*$", re.DOTALL)
+TREATMENT_MARKER = re.compile(r"^\s*\((?:spoken|sung)\)\s*(?::\s*)?", re.IGNORECASE)
 BPM_PATTERN = re.compile(r"(?<!\d)(\d{2,3})\s*BPM\b", re.IGNORECASE)
+EDITORIAL_MARKER = re.compile(
+    r"\s*W-pI\.[0-9]+\.[0-9]+\.|\s*\(\d+\)|\s\d+\s+(?=[A-Z])"
+)
 
 
 def normalize_source_text(value: str) -> str:
     value = unicodedata.normalize("NFKC", value)
     value = value.replace("—", "-").replace("–", "-")
+    value = EDITORIAL_MARKER.sub(" ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip().casefold()
+
+
+def _match_positions(source: str, chunk: str) -> list[int]:
+    positions: list[int] = []
+    start = 0
+    while True:
+        idx = source.find(chunk, start)
+        if idx == -1:
+            break
+        positions.append(idx)
+        start = idx + 1
+    return positions
+
+
+def _is_verbatim_line(norm_line: str, norm_source: str) -> bool:
+    if not norm_line:
+        return False
+    if norm_line in norm_source:
+        return True
+    n = len(norm_line)
+    words = norm_line.split()
+    if words:
+        for count in range(2, len(words) + 1):
+            if len(words) % count:
+                continue
+            unit_words = words[: len(words) // count]
+            if unit_words * count == words:
+                unit = " ".join(unit_words)
+                if unit in norm_source:
+                    return True
+
+    position = 0
+    previous_start = -1
+    previous_end = -1
+    while position < n:
+        matched = False
+        for end in range(n, position, -1):
+            chunk = norm_line[position:end]
+            positions = _match_positions(norm_source, chunk)
+            candidates = [
+                p
+                for p in positions
+                if previous_start == -1
+                or p == previous_end
+                or p + len(chunk) == previous_start
+            ]
+            if candidates:
+                position = end
+                previous_start = candidates[0]
+                previous_end = candidates[0] + len(chunk)
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
 
 
 def validate_verbatim_lyrics(lyrics: str, source_text: str) -> ValidationReport:
@@ -39,7 +100,12 @@ def validate_verbatim_lyrics(lyrics: str, source_text: str) -> ValidationReport:
         if not line or SECTION_LABEL.fullmatch(line) or NON_LYRICAL_DIRECTION.fullmatch(line):
             continue
         checked_lines += 1
-        if normalize_source_text(line) not in normalized_source:
+        ad_lib = AD_LIB.fullmatch(line)
+        if ad_lib:
+            line = ad_lib.group(1).strip()
+        else:
+            line = TREATMENT_MARKER.sub("", line).strip()
+        if not _is_verbatim_line(normalize_source_text(line), normalized_source):
             issues.append(
                 ValidationIssue(
                     code="non_verbatim_line",

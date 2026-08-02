@@ -12,6 +12,8 @@ Analyze only the supplied approved source. Return lesson type, themes, emotional
 
 Score each supplied lesson-style pair from 0–10. Weight thematic/emotional fit 30%, energy 20%, lyric density 15%, repetition 10%, vocal clarity 10%, emotional arc 10%, and song-form fit 5%. Do not choose a winner or default to ambient/chant. Output compact JSON records only.
 
+Return exactly one score record per supplied style ID — no fewer, no more. The output count must equal the number of style IDs given. If any style is skipped, the run fails.
+
 ## Archetype selector
 
 Choose one:
