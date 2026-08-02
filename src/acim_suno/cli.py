@@ -9,7 +9,7 @@ from .adapter import create_style_adaptation
 from .export import export_lesson_folder, export_suno_batch
 from .extract_styles import extract_styles_from_csv
 from .generator import generate_song
-from .io import dump_json, load_jsonl_models, load_models, load_yaml
+from .io import dump_json, load_env, load_jsonl_models, load_models, load_yaml
 from .llm import (
     analyze_lesson,
     create_llm_provider,
@@ -706,6 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
