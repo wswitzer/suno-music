@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from pathlib import Path
@@ -283,8 +284,16 @@ class MockLLMProvider(LLMProvider):
 
 
 class GeminiLLMProvider(LLMProvider):
-    def __init__(self, model: str = "gemini-2.0-flash") -> None:
+    def __init__(
+        self,
+        model: str = "gemini-3.1-pro-preview",
+        *,
+        project: str | None = None,
+        location: str | None = None,
+    ) -> None:
         self._model = model
+        self._project = project or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        self._location = location or os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
         self._client = None
 
     @property
@@ -300,13 +309,20 @@ class GeminiLLMProvider(LLMProvider):
         seed: int | None = None,
     ) -> T:
         try:
-            from google import genai
-            from google.genai import types
+            from google.genai import Client, types
         except ImportError:
-            raise ImportError("Install google-genai for Gemini support")
+            raise ImportError("Install google-genai for Gemini Vertex AI support")
 
         if self._client is None:
-            self._client = genai.Client()
+            if not self._project:
+                raise ValueError(
+                    "GOOGLE_CLOUD_PROJECT is required for Gemini Vertex AI access"
+                )
+            self._client = Client(
+                vertexai=True,
+                project=self._project,
+                location=self._location,
+            )
 
         response = self._client.models.generate_content(
             model=self._model,
@@ -371,7 +387,7 @@ def create_llm_provider(
     if provider == "mock":
         return MockLLMProvider(model or "mock-0.1.0")
     if provider == "gemini":
-        return GeminiLLMProvider(model or "gemini-2.0-flash")
+        return GeminiLLMProvider(model or "gemini-3.1-pro-preview")
     if provider == "openai":
         return OpenAILLMProvider(model or "gpt-4o")
     raise ValueError(f"Unknown provider: {provider}")
@@ -397,6 +413,7 @@ def score_compatibility(
     styles: list[StyleRecord],
     llm: LLMProvider,
     prompt_version: str = "0.1.0",
+    max_attempts: int = 3,
 ) -> list[CompatibilityScore]:
     system_prompt = _load_prompt_section("compatibility scorer")
     lesson_info = (
@@ -410,9 +427,37 @@ def score_compatibility(
         f"energy={s.energy}, density={s.lyric_density}, prompt={s.core_prompt[:100]}"
         for s in styles
     )
-    user_prompt = f"{lesson_info}\nAvailable styles:\n{styles_info}\n"
-    response = llm.generate_structured(system_prompt, user_prompt, CompatibilityScoreBatch)
-    return response.root
+    expected_ids = {s.style_id for s in styles}
+    user_prompt = (
+        f"{lesson_info}\nAvailable styles ({len(styles)} total):\n{styles_info}\n"
+        f"\nReturn exactly {len(styles)} score records, one per style_id listed above."
+    )
+    last_error: str | None = None
+    for attempt in range(1, max_attempts + 1):
+        response = llm.generate_structured(system_prompt, user_prompt, CompatibilityScoreBatch)
+        scores = [
+            score.model_copy(update={"language": lesson.language}) for score in response.root
+        ]
+        returned_ids = {r.style_id for r in scores}
+        missing = sorted(expected_ids - returned_ids)
+        if not missing:
+            return scores
+        last_error = f"missing {len(missing)} score(s): {', '.join(missing[:5])}"
+        logger.warning(
+            "Compatibility score batch incomplete (attempt %d/%d): %s",
+            attempt,
+            max_attempts,
+            last_error,
+        )
+        if attempt < max_attempts:
+            user_prompt += (
+                f"\n\nPrevious attempt omitted scores for: {', '.join(missing[:10])}. "
+                f"Return records for EVERY one of the {len(styles)} style IDs."
+            )
+    raise ValueError(
+        f"Compatibility scoring failed for lesson {lesson.lesson_number} after "
+        f"{max_attempts} attempts: {last_error}"
+    )
 
 
 def select_archetype(
