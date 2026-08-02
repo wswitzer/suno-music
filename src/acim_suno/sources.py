@@ -205,6 +205,36 @@ def _is_review_lesson(lesson_number: int) -> bool:
     return any(start <= lesson_number <= end for start, end in REVIEW_LESSON_RANGES)
 
 
+def _reviewed_lesson_numbers(
+    title: str,
+    paragraphs: list[dict[str, object]],
+) -> list[dict[str, int]] | None:
+    """Return the workbook lesson numbers a review lesson recapitulates.
+
+    Review lessons pair the preceding ideas, each marked in the source as a
+    three-digit parenthetical (e.g. ``(101)``). Extract those markers in
+    paragraph order into a stable, unique list so downstream stages (and
+    tests) can confirm both reviewed ideas are preserved.
+    """
+    if not _is_review_lesson(_parse_lesson_number(title)):
+        return None
+    seen: set[int] = set()
+    result: list[dict[str, int]] = []
+    for paragraph in paragraphs:
+        text = str(paragraph.get("text", ""))
+        for raw in re.findall(r"\((\d{3})\)", text):
+            num = int(raw)
+            if num not in seen:
+                seen.add(num)
+                result.append({"lesson": num})
+    return result or None
+
+
+def _parse_lesson_number(title: str) -> int:
+    match = re.search(r"(\d+)", title)
+    return int(match.group(1)) if match else 0
+
+
 def _reference_sort_key(reference: str) -> tuple[int, tuple[int, ...], str]:
     numbers = tuple(int(value) for value in re.findall(r"\d+", reference))
     return (0 if numbers else 1, numbers, reference.casefold())
@@ -408,6 +438,7 @@ class PineconeSourceProvider:
                     ),
                     sentences=sentences,
                     paragraphs=paragraph_texts,
+                    reviewed_lessons=_reviewed_lesson_numbers(title, paragraphs_raw),
                 )
             )
 

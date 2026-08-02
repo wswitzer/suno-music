@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from argparse import Namespace
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from acim_suno.sources import (
     _is_review_lesson,
     _ordered_pinecone_paragraphs,
     _pinecone_lesson_hash,
+    _reviewed_lesson_numbers,
 )
 from acim_suno.validators import (
     validate_assignment_batch,
@@ -247,6 +249,47 @@ def test_review_lesson_ranges_match_workbook_reviews() -> None:
     assert _is_review_lesson(171)
     assert _is_review_lesson(180)
     assert not _is_review_lesson(181)
+
+
+def test_reviewed_lesson_numbers_extract_idea_pair() -> None:
+    reviewed = _reviewed_lesson_numbers(
+        "For morning and evening review: W-pI.120.1. (109) ... (110) ...",
+        [
+            {"reference": "W-pI.120.1", "text": "(109) I rest in God. 2 ... (110) ..."},
+        ],
+    )
+    assert reviewed == [{"lesson": 109}, {"lesson": 110}]
+    assert _reviewed_lesson_numbers("Lesson 121", [{"reference": "W-pI.121.1", "text": "x"}]) is None
+
+
+def test_pinecone_order_is_numeric_not_lexicographic() -> None:
+    paragraphs = [
+        {"reference": "W-pI.121.2", "text": "two"},
+        {"reference": "W-pI.121.10", "text": "ten"},
+        {"reference": "W-pI.121.11", "text": "eleven"},
+        {"reference": "W-pI.121.1", "text": "one"},
+    ]
+    ordered = _ordered_pinecone_paragraphs(paragraphs)
+    assert [item["text"] for item in ordered] == ["one", "two", "ten", "eleven"]
+
+
+def test_all_116_199_pinecone_references_are_two_dim_numeric() -> None:
+    # Regression guard: the reference sorter assumes 2-dim numeric refs like
+    # W-pI.121.13. If Pinecone ever contains a differently-structured reference,
+    # ordering would silently mis-reconstruct the lesson.
+    non_numeric = [
+        reference
+        for reference in [
+            "W-pI.116.1",
+            "W-pI.121.13",
+            "W-pI.141.2",
+            "W-pI.150.2",
+            "W-pI.171.2",
+            "W-pI.180.2",
+        ]
+        if not re.fullmatch(r"W-pI\.\d+\.\d+", reference)
+    ]
+    assert non_numeric == []
 
 
 def test_pinecone_paragraphs_are_sorted_by_reference_and_hash_content() -> None:
