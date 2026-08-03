@@ -97,3 +97,45 @@ the **Pinecone-derived** `source_text`. Root cause and resolution explored:
 - Preserve clean paragraph sentences as atomic `SourceSentence` units.
 - Do not emit source IDs, editorial numbering, or workbook references as lyrics.
 - Re-run 116–125 from ingestion onward because source hashes/profiles/score caches change.
+
+## Fresh acceptance run (clean JSON source, Vertex AI Gemini)
+
+Re-ran ingestion → analyze → score → optimize → plan → adapt → generate on the
+canonical `workbook_enhanced.json` (passed via `ACIM_WORKBOOK_JSON`; no paths
+hardcoded), then ran the targeted `repair` stage (max 3 attempts, invariant 7) on
+the failures only.
+
+| Lesson | Type | Generated | After repair | Notes |
+|--------|------|-----------|:------------:|-------|
+| 116 | REVIEW (101/102) | 12 errors | pass | leading `(NNN)` prefixes stripped by `LEADING_EDITORIAL_NUMBER`; no mid-line fuses |
+| 117 | REVIEW (103/104) | 2 errors | pass | repair split fused idea+marker lines; leading markers remain metadata-only |
+| 118 | REVIEW (105/106) | 3 errors | pass | same seam-split treatment |
+| 119 | REVIEW (107/108) | 2 errors | pass | same seam-split treatment |
+| 120 | REVIEW (109/110) | 0 errors | pass | clean source, no more `W-pI.120.W-pI.2` leak |
+| 121 | standard | 4 errors | pass | repair un-fused cross-sentence seams |
+| 122 | short | 0 errors | pass | unchanged |
+| 123 | long | 0 errors | pass | unchanged |
+| 124 | practice-centered | 3 errors | pass | repair un-fused cross-sentence seams |
+| 125 | standard | 0 errors | pass | unchanged |
+
+- **Verdict: 10/10 pass strict verbatim**, validated against each lesson's clean
+  `source_text` (sentence-join, `idea_clean` not duplicated, editorial refs and
+  leading `(NNN)` markers normalized) — the same code path used in `cli.py`
+  (`validate_verbatim_lyrics(full_lyrics_text, lesson.source_text)`).
+- **No mid-line `(NNN)` fuses** remain (verified: every `(NNN)` marker is a
+  leading line prefix, stripped by normalization → verbatim source fragment).
+- **Hash parity:** all 10 repaired artifacts carry `source_hash` equal to the
+  lesson's `source.source_hash` (no stale provenance after the source change).
+- **No leaked content:** 0 editorial refs (`W-pI.n`), 0 absolute machine paths,
+  0 API keys in artifact JSON.
+- **Tests:** 25 passing (`tests/test_pipeline.py`); `ruff check src tests` clean.
+
+### Outcome
+- L116–119 (the Review I block whose `reviewed_lessons` was `null`) now correctly
+  derive `[101,102]…[108,109]` pairings from sentence `(NNN)` markers, and their
+  generated review songs preserve both reviewed ideas as separate exact source
+  lines rather than fused seams.
+- The `idea_clean` duplication defect (5,144-char "teaching sentence" echoing all
+  atomic sentences) is eliminated for L122; sentences are atomic again.
+- **Ready for the full 116–199 accept/reject gate.** PR #2 stays draft pending
+  this verification; no canonical config or curated `core_prompt` bytes changed.
