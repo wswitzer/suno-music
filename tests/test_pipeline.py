@@ -18,6 +18,7 @@ from acim_suno.models import (
     GeneratedLyricsResponse,
     LessonAnalysisProfile,
     LessonRecord,
+    LessonType,
     LyricPlan,
     PlanSection,
     SongArchetype,
@@ -475,6 +476,50 @@ def test_json_provider_does_not_emit_idea_clean_as_duplicate_sentence(tmp_path: 
             if text is other:
                 continue
             assert text not in other
+
+
+def test_json_provider_derives_review_pairing_when_field_is_null(tmp_path: Path) -> None:
+    """Workbook Review I lessons (111-120) ship reviewed_lessons=null in the canonical
+    JSON, even though each reviewed idea is still tagged inline as (101)/(102).
+    The provider must derive the pairing from those markers so review metadata is
+    represented consistently (mirrors the Pinecone provider)."""
+    source_path = tmp_path / "workbook_enhanced.json"
+    source_path.write_text(
+        json.dumps(
+            {
+                "language": "en",
+                "parts": {
+                    "part_1": {
+                        "lessons": {
+                            "116": {
+                                "title_clean": "For morning and evening review:",
+                                "idea_clean": (
+                                    "For morning and evening review: "
+                                    "(101) God's Will for me is perfect happiness. "
+                                    "(102) I share God's Will for happiness for me."
+                                ),
+                                "paragraphs": [
+                                    {
+                                        "reference": "W-pI.116.1",
+                                        "sentences": [
+                                            {"text": "(101) God's Will for me is perfect happiness."},
+                                            {"text": "(102) I share God's Will for happiness for me."},
+                                        ],
+                                    }
+                                ],
+                                "practice_instructions": {},
+                                "reviewed_lessons": None,
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    record = ACIMJsonSourceProvider(source_path).fetch_lessons(116, 116)[0]
+    assert record.lesson_type == LessonType.REVIEW
+    assert record.reviewed_lessons == [{"lesson": 101}, {"lesson": 102}]
 
 
 def test_json_provider_hash_changes_with_canonical_lesson_text(tmp_path: Path) -> None:

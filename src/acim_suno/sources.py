@@ -99,7 +99,6 @@ class ACIMJsonSourceProvider:
                         practice_instructions[key] = value
                     elif isinstance(value, (list, dict)):
                         practice_instructions[key] = json.dumps(value, ensure_ascii=False)
-
             reviewed = raw.get("reviewed_lessons")
             is_review = _is_review_lesson(num) or reviewed is not None
             is_experiential = any(
@@ -115,6 +114,12 @@ class ACIMJsonSourceProvider:
 
             paragraph_texts = self._extract_paragraph_texts(paragraphs)
             sentences = self._build_sentences(raw, num)
+
+            if is_review and not reviewed:
+                reviewed = _reviewed_lesson_numbers_from_sentences(
+                    [sentence.text for sentence in sentences]
+                )
+
             lesson_source_hash = self._lesson_hash(
                 lesson_number=num,
                 language=language,
@@ -285,6 +290,29 @@ def _reviewed_lesson_numbers(
     for paragraph in paragraphs:
         text = str(paragraph.get("text", ""))
         for raw in re.findall(r"\((\d{3})\)", text):
+            num = int(raw)
+            if num not in seen:
+                seen.add(num)
+                result.append({"lesson": num})
+    return result or None
+
+
+def _reviewed_lesson_numbers_from_sentences(
+    sentence_texts: list[str],
+) -> list[dict[str, int]] | None:
+    """Derive a review lesson's recapitulated idea numbers from ``(ddd)`` markers.
+
+    The canonical JSON exposes structured ``reviewed_lessons`` for most review
+    lessons (141-150, 171-180), but leaves it null for Workbook Review I
+    (111-120). Those lessons still mark each reviewed idea inline as a
+    three-digit parenthetical (e.g. ``(101)``), so the pairing is recoverable
+    from the clean sentence text. This mirrors the Pinecone provider's
+    derivation and keeps the review pairing explicit and testable everywhere.
+    """
+    seen: set[int] = set()
+    result: list[dict[str, int]] = []
+    for text in sentence_texts:
+        for raw in re.findall(r"\((\d{3})\)", str(text)):
             num = int(raw)
             if num not in seen:
                 seen.add(num)
