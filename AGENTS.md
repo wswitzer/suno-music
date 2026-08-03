@@ -51,19 +51,21 @@ The Lesson 338 title-mantra / spoken-teaching / prayer structure is one archetyp
 
 ## Source data access
 
-ACIM lesson text is stored in a Pinecone vector database. Reference `vector_database.md` in the `acim-core-data` project for full API specs (index host, namespace schema, metadata filter queries, embedding model). The key details for this project:
+For the deterministic English Workbook generation pipeline, the canonical source is the clean structured `workbook_enhanced.json` maintained by the separate `acim-core-data` project. Pass its local path with `--source-json` or `ACIM_WORKBOOK_JSON`; never hardcode a machine-specific path and never copy the copyrighted dataset into this public repository. `ACIMJsonSourceProvider` must expose clean authorial text only to generation/validation stages, with editorial numbering and workbook references treated as metadata.
+
+Pinecone remains a secondary search/cross-check representation, not the canonical serialization for strict lyric generation. Reference `vector_database.md` in `acim-core-data` for API specs when semantic search or cross-checking is needed. Key Pinecone details:
 
 - **Index:** `acim-text` (host: `https://acim-text-e2xpwpt.svc.aped-4627-b74a.pinecone.io`)
 - **Region:** `us-east-1` (AWS Serverless)
 - **Dimension:** 768 dense float dimensions
 - **Metric:** Cosine / Dot Product
 - **Embedding model:** Google Gemini `models/gemini-embedding-001` with `outputDimensionality: 768`
-- **Namespaces:**
-  - `text` (2,358 vectors) — all 31 chapters at paragraph level; metadata has `book`, `chapter`, `section`, `reference`, `title`, `text`, `type`
-  - `workbook` (1,833 vectors) — all 365 lessons + reviews; metadata has `book`, `part`, `lesson`, `section`, `reference`, `title`, `text`, `type`
+- **Namespaces:** `text` and `workbook`
 - **Filter by:** `{"lesson": {"$eq": <number>}}` with a dummy `[0.01] * 768` vector (`includeMetadata: true`)
-- **API key:** `PINECONE_API_KEY` environment variable (configured in the Album Creator project as `VITE_PINECONE_API_KEY` in its `.env.local`)
-- **Source provider:** `PineconeSourceProvider` in `src/acim_suno/sources.py`
+- **API key:** `PINECONE_API_KEY` environment variable
+- **Provider:** `PineconeSourceProvider` in `src/acim_suno/sources.py`
+
+Under `verbatim_only`, exact source phrases may be arranged, repeated, or interleaved as separate lyric lines/sections, but words from noncontiguous source spans must never be fused into a new phrase.
 
 ## Gemini LLM access (as configured in Album Creator)
 

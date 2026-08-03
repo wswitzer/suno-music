@@ -74,8 +74,11 @@ the **Pinecone-derived** `source_text`. Root cause and resolution explored:
 - Which source does the verbatim validator compare against? Recommended: the
   **clean JSON source** (single source of truth from `acim-core-data`), not the
   number-retaining Pinecone text.
-- Whether idea-interleaved refrains (L116/L117 outros) count as acceptable under
-  `verbatim_only`, and how L120's numbered output should be repaired/regenerated.
+- **Resolved policy:** musical interleaving is allowed at the arrangement level, but
+  each interleaved unit must remain its own exact contiguous source phrase/line.
+  L116/L117's fused outro lines therefore remain invalid and should be targeted-repaired
+  into separate exact source lines. L120 should be regenerated from the clean JSON source
+  before any special-case repair is considered.
 
 ## Data integrity / source-of-truth notes
 
@@ -86,3 +89,11 @@ the **Pinecone-derived** `source_text`. Root cause and resolution explored:
 - There is a malformed reference in the Pinecone data: `W-pI.120.W-pI.2`.
   Ordering is unaffected (L120 has a single vector `W-pI.120.1`), but the string
   leaks into generated lyrics, so the source record is worth auditing.
+
+## Resolution adopted after review
+
+- Keep the strict validator unchanged.
+- Use `workbook_enhanced.json` through `ACIMJsonSourceProvider` as the canonical English generation/validation source; Pinecone is secondary.
+- Preserve clean paragraph sentences as atomic `SourceSentence` units.
+- Do not emit source IDs, editorial numbering, or workbook references as lyrics.
+- Re-run 116–125 from ingestion onward because source hashes/profiles/score caches change.

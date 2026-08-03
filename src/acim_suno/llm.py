@@ -600,9 +600,18 @@ def generate_lyrics(
             f"source IDs: {s.source_sentence_ids}"
             for s in plan.sections
         )
-        + "\n\nSource sentences:\n"
+        + "\n\nSource sentences follow. The L###_### tokens are metadata labels only; "
+        "never output them as lyrics.\n"
         + "\n".join(f"  {s.sentence_id}: {s.text}" for s in lesson.sentences)
-        + "\n\nProduce lyrics with [Section] headers and (ad-lib) directions."
+        + (
+            "\n\nProduce lyrics with [Section] headers. Exact contiguous source phrases may "
+            "be repeated, reordered, and interleaved as separate lyric lines or sections, "
+            "but never splice noncontiguous source spans into one new lyric phrase. "
+            "Never emit source IDs, workbook references (such as W-pI.*), paragraph/sentence "
+            "numbers, or editorial metadata unless those characters are themselves part of "
+            "the approved clean source text. Treatment markers such as (Spoken) or (Sung) "
+            "are metadata, not lyric content."
+        )
     )
     response = llm.generate_structured(system_prompt, user_prompt, GeneratedLyricsResponse)
     return response.root

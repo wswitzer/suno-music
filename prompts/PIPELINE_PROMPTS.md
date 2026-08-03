@@ -39,7 +39,7 @@ Append a concise adaptation to the immutable core. Allowed: BPM within range, vo
 
 ## Lyric writer
 
-Write from the approved plan and source IDs. Under `verbatim_only`, every sung or spoken phrase—including parenthetical ad-libs—must occur contiguously in the source. Repetition and line-break changes are allowed; additions, substitutions, deletions, and word rearrangement are not. Use conservative Suno labels. Keep production prose in the style field, not the lyrics field.
+Write from the approved plan and source IDs. Under `verbatim_only`, every sung or spoken phrase—including parenthetical ad-libs—must occur contiguously in the source. Exact source phrases may be repeated, reordered, and interleaved at the arrangement level when each phrase remains its own valid source line or section; never fuse noncontiguous source spans into a new lyric phrase. Line-break changes are allowed within exact source wording; additions, substitutions, deletions, and word rearrangement within a phrase are not. Source IDs, workbook references, paragraph/sentence numbers, and editorial metadata are never lyrical content unless those characters are themselves present in the approved clean source. Use conservative Suno labels. Keep production prose in the style field, not the lyrics field.
 
 ## Targeted repair
 

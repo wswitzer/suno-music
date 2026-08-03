@@ -72,6 +72,22 @@ acim-suno extract-styles \
 
 The resulting prompts are preserved verbatim. A later LLM/manual normalization pass should add buckets, tags, locked traits, mutable traits, and ranges without overwriting `core_prompt`.
 
+## Canonical workbook source
+
+For deterministic English generation, use the clean structured `workbook_enhanced.json` from the separate `acim-core-data` project. Keep that file local and pass its path with `--source-json` or the `ACIM_WORKBOOK_JSON` environment variable; do not copy it into this public repository. Pinecone is retained for semantic search and cross-checking, but strict generation/validation should use the clean JSON representation so editorial numbering and references are not mistaken for lyric text.
+
+```bash
+ACIM_WORKBOOK_JSON=/path/to/acim-core-data/workbook_enhanced.json \
+acim-suno run-batch \
+  --source-type acim_json \
+  --language en \
+  --lesson-start 116 \
+  --lesson-end 125 \
+  --provider gemini
+```
+
+Under `verbatim_only`, exact source phrases may be repeated, reordered, and interleaved as separate lyric lines or sections. Combining words from noncontiguous source spans into a new phrase remains invalid.
+
 ## Validate verbatim-only lyrics
 
 ```bash

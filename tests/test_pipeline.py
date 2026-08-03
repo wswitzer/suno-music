@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from argparse import Namespace
 from pathlib import Path
@@ -28,6 +29,7 @@ from acim_suno.models import (
 )
 from acim_suno.optimizer import optimize_assignments
 from acim_suno.planner import choose_archetype
+from acim_suno.repair import create_repair_request, repair_song
 from acim_suno.sources import (
     ACIMJsonSourceProvider,
     _is_review_lesson,
@@ -259,7 +261,9 @@ def test_reviewed_lesson_numbers_extract_idea_pair() -> None:
         ],
     )
     assert reviewed == [{"lesson": 109}, {"lesson": 110}]
-    assert _reviewed_lesson_numbers("Lesson 121", [{"reference": "W-pI.121.1", "text": "x"}]) is None
+    assert (
+        _reviewed_lesson_numbers("Lesson 121", [{"reference": "W-pI.121.1", "text": "x"}]) is None
+    )
 
 
 def test_pinecone_order_is_numeric_not_lexicographic() -> None:
@@ -379,3 +383,168 @@ def test_compatibility_scoring_rejects_duplicate_style_records() -> None:
     ]
     with pytest.raises(ValueError, match="Compatibility scoring failed"):
         score_compatibility(item, styles, DuplicateScoreProvider(), max_attempts=1)
+
+
+def _write_canonical_workbook(
+    path: Path, *, second_text: str = "Second canonical sentence."
+) -> None:
+    payload = {
+        "language": "en",
+        "parts": {
+            "part_1": {
+                "lessons": {
+                    "122": {
+                        "title_clean": "Synthetic lesson idea.",
+                        "idea_clean": "Synthetic lesson idea.",
+                        "paragraphs": [
+                            {
+                                "sentences": [
+                                    {"number": 2, "text": "First canonical sentence."},
+                                    {"number": 3, "text": second_text},
+                                    {"number": 4, "text": "Third canonical sentence."},
+                                ]
+                            }
+                        ],
+                        "practice_instructions": {"description": "Synthetic practice instruction."},
+                    },
+                    "123": {
+                        "title_clean": "Synthetic lesson 123.",
+                        "paragraphs": [
+                            {"sentences": [{"number": 1, "text": "A different lesson sentence."}]}
+                        ],
+                    },
+                }
+            }
+        },
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_json_provider_uses_atomic_clean_sentences_and_per_lesson_hashes(tmp_path: Path) -> None:
+    source_path = tmp_path / "workbook_enhanced.json"
+    _write_canonical_workbook(source_path)
+    provider = ACIMJsonSourceProvider(source_path, source_language="en")
+    items = provider.fetch_lessons(122, 123, language="en")
+    lesson_122, lesson_123 = items
+
+    texts = [sentence.text for sentence in lesson_122.sentences]
+    assert "First canonical sentence." in texts
+    assert "Second canonical sentence." in texts
+    assert "Third canonical sentence." in texts
+    assert all("W-pI." not in value for value in texts)
+    assert all(not re.match(r"^\d+\s", value) for value in texts)
+    assert lesson_122.source.source_hash != lesson_123.source.source_hash
+
+
+def test_json_provider_hash_changes_with_canonical_lesson_text(tmp_path: Path) -> None:
+    source_path = tmp_path / "workbook_enhanced.json"
+    _write_canonical_workbook(source_path)
+    first = ACIMJsonSourceProvider(source_path).fetch_lessons(122, 122)[0]
+    _write_canonical_workbook(source_path, second_text="Changed canonical sentence.")
+    second = ACIMJsonSourceProvider(source_path).fetch_lessons(122, 122)[0]
+    assert first.source.source_hash != second.source.source_hash
+
+
+def test_json_provider_fails_when_requested_lesson_is_missing(tmp_path: Path) -> None:
+    source_path = tmp_path / "workbook_enhanced.json"
+    _write_canonical_workbook(source_path)
+    provider = ACIMJsonSourceProvider(source_path)
+    with pytest.raises(ValueError, match="missing 1 requested lesson"):
+        provider.fetch_lessons(122, 124)
+
+
+def test_verbatim_allows_arrangement_interleaving_but_not_phrase_splicing() -> None:
+    source = "First exact phrase. Intervening teaching. Second exact phrase."
+    separate_lines = "[Outro]\nFirst exact phrase.\nSecond exact phrase."
+    fused_line = "[Outro]\nFirst exact phrase. Second exact phrase."
+    assert validate_verbatim_lyrics(separate_lines, source).passed
+    assert not validate_verbatim_lyrics(fused_line, source).passed
+
+
+class CapturingLyricsProvider(MockLLMProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_lyrics_prompt = ""
+
+    def generate_structured(
+        self, system_prompt, user_prompt, response_model, temperature=0.0, seed=None
+    ):
+        if response_model is GeneratedLyricsResponse:
+            self.last_lyrics_prompt = user_prompt
+        return super().generate_structured(
+            system_prompt, user_prompt, response_model, temperature, seed
+        )
+
+
+def test_lyric_writer_explicitly_forbids_source_metadata_output() -> None:
+    provider = CapturingLyricsProvider()
+    item = lesson(116)
+    style = StyleRecord(style_id="STYLE_1", name="Demo", core_prompt="Warm acoustic folk.")
+    plan = LyricPlan(
+        lesson_number=116,
+        language="en",
+        archetype=SongArchetype.TITLE_TEACHING_PRAYER,
+        sections=[PlanSection(label="Chorus", function="title", source_sentence_ids=["title"])],
+    )
+    adaptation = StyleAdaptation(
+        style_id="STYLE_1",
+        lesson_number=116,
+        core_prompt=style.core_prompt,
+        adaptation="Gentle delivery.",
+        final_prompt=f"{style.core_prompt} Gentle delivery.",
+    )
+    generate_lyrics(item, plan, adaptation, provider)
+    prompt = provider.last_lyrics_prompt
+    assert "metadata labels only" in prompt
+    assert "Never emit source IDs" in prompt
+    assert "never splice noncontiguous source spans" in prompt
+
+
+class RepairWrapperProvider(MockLLMProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.response_model_seen = None
+
+    def generate_structured(
+        self, system_prompt, user_prompt, response_model, temperature=0.0, seed=None
+    ):
+        if response_model is GeneratedLyricsResponse:
+            self.response_model_seen = response_model
+            generated_lyric = __import__(
+                "acim_suno.models", fromlist=["GeneratedLyric"]
+            ).GeneratedLyric(section_label="Chorus", text="Demo 116")
+            return GeneratedLyricsResponse([generated_lyric])
+        return super().generate_structured(
+            system_prompt, user_prompt, response_model, temperature, seed
+        )
+
+
+def test_repair_uses_structured_lyrics_wrapper() -> None:
+    item = lesson(116)
+    style = StyleRecord(style_id="STYLE_1", name="Demo", core_prompt="Warm acoustic folk.")
+    plan = LyricPlan(
+        lesson_number=116,
+        language="en",
+        archetype=SongArchetype.TITLE_TEACHING_PRAYER,
+        sections=[PlanSection(label="Chorus", function="title", source_sentence_ids=["title"])],
+    )
+    adaptation = StyleAdaptation(
+        style_id="STYLE_1",
+        lesson_number=116,
+        core_prompt=style.core_prompt,
+        adaptation="Gentle delivery.",
+        final_prompt=f"{style.core_prompt} Gentle delivery.",
+    )
+    generated_lyric = __import__("acim_suno.models", fromlist=["GeneratedLyric"]).GeneratedLyric(
+        section_label="Chorus", text="Invented line"
+    )
+    artifact = __import__(
+        "acim_suno.generator", fromlist=["create_song_artifact"]
+    ).create_song_artifact(item, plan, adaptation, [generated_lyric])
+    report = validate_verbatim_lyrics(artifact.full_lyrics_text, item.source_text)
+    request = create_repair_request(artifact, report, max_retries=1)
+    provider = RepairWrapperProvider()
+    repaired, _, repaired_report = repair_song(request, item, provider)
+    assert provider.response_model_seen is GeneratedLyricsResponse
+    assert repaired is not None
+    assert repaired_report.passed

@@ -3,6 +3,7 @@ from __future__ import annotations
 from .llm import LLMProvider
 from .models import (
     GeneratedLyric,
+    GeneratedLyricsResponse,
     LessonRecord,
     SongArtifact,
     TargetedRepairRequest,
@@ -82,6 +83,8 @@ def repair_song(
         system_prompt = (
             "Repair only the validator-listed fields. Preserve all passing material byte-for-byte. "
             "For source failures, select a contiguous approved source phrase that matches. "
+            "Separate exact source phrases into separate lyric lines rather than splicing "
+            "noncontiguous spans together. Never emit source IDs or editorial references. "
             "Output JSON with repaired lyrics only."
         )
         user_prompt = (
@@ -92,9 +95,9 @@ def repair_song(
             + "\n".join(s.text for s in lesson.sentences)
             + "\n\nReplacement must use contiguous approved source text."
         )
-        result = llm.generate_structured(system_prompt, user_prompt, list[GeneratedLyric])
-        if result:
-            repaired_lyrics = result
+        result = llm.generate_structured(system_prompt, user_prompt, GeneratedLyricsResponse)
+        if result.root:
+            repaired_lyrics = result.root
 
     from .generator import build_full_lyrics_text
 

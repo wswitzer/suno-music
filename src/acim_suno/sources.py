@@ -17,6 +17,13 @@ class SourceProvider(Protocol):
 
 
 class ACIMJsonSourceProvider:
+    """Canonical structured workbook source provider.
+
+    The enhanced JSON is the deterministic source for generation and validation.
+    Editorial numbering/reference metadata is intentionally excluded from
+    ``SourceSentence.text``; only clean authorial text is exposed to lyric stages.
+    """
+
     def __init__(
         self,
         json_path: str | Path,
@@ -51,6 +58,7 @@ class ACIMJsonSourceProvider:
         return hashlib.sha256(self._path.read_bytes()).hexdigest()
 
     def get_source_hash(self) -> str:
+        """Return the complete source-file identity hash."""
         return self._source_hash
 
     def fetch_lessons(
@@ -67,39 +75,37 @@ class ACIMJsonSourceProvider:
         all_lessons: dict[str, dict] = {}
         for part in parts.values():
             lesson_dict = part.get("lessons", {})
-            for k, v in lesson_dict.items():
-                if k in all_lessons:
-                    continue
-                all_lessons[k] = v
+            for key, value in lesson_dict.items():
+                if key not in all_lessons:
+                    all_lessons[key] = value
+
+        missing = [num for num in range(start, end + 1) if str(num) not in all_lessons]
+        if missing:
+            preview = ", ".join(str(num) for num in missing[:10])
+            raise ValueError(
+                f"JSON source is missing {len(missing)} requested lesson(s): {preview}"
+            )
 
         records: list[LessonRecord] = []
         for num in range(start, end + 1):
-            key = str(num)
-            raw = all_lessons.get(key)
-            if raw is None:
-                continue
-
+            raw = all_lessons[str(num)]
             title = raw.get("title_clean") or raw.get("title", "") or f"Lesson {num}"
             paragraphs = raw.get("paragraphs", [])
             practice_raw = raw.get("practice_instructions", {})
             practice_instructions: dict[str, str] = {}
             if isinstance(practice_raw, dict):
-                for pk, pv in practice_raw.items():
-                    if isinstance(pv, str):
-                        practice_instructions[pk] = pv
-                    elif isinstance(pv, (list, dict)):
-                        practice_instructions[pk] = json.dumps(pv, ensure_ascii=False)
+                for key, value in practice_raw.items():
+                    if isinstance(value, str):
+                        practice_instructions[key] = value
+                    elif isinstance(value, (list, dict)):
+                        practice_instructions[key] = json.dumps(value, ensure_ascii=False)
 
             reviewed = raw.get("reviewed_lessons")
-
             is_review = _is_review_lesson(num) or reviewed is not None
-            is_experiential = (
-                "stillness" in title.lower()
-                or "quiet" in title.lower()
-                or "experiential" in title.lower()
-                or "meditation" in title.lower()
+            is_experiential = any(
+                marker in title.lower()
+                for marker in ("stillness", "quiet", "experiential", "meditation")
             )
-
             if is_review:
                 lesson_type = LessonType.REVIEW
             elif is_experiential:
@@ -108,7 +114,16 @@ class ACIMJsonSourceProvider:
                 lesson_type = LessonType.STANDARD
 
             paragraph_texts = self._extract_paragraph_texts(paragraphs)
-            sentences = self._build_sentences(raw, num, paragraph_texts)
+            sentences = self._build_sentences(raw, num)
+            lesson_source_hash = self._lesson_hash(
+                lesson_number=num,
+                language=language,
+                title=title,
+                sentences=sentences,
+                paragraphs=paragraph_texts,
+                practice_instructions=practice_instructions,
+                reviewed_lessons=reviewed,
+            )
 
             records.append(
                 LessonRecord(
@@ -119,7 +134,7 @@ class ACIMJsonSourceProvider:
                     source=SourceMetadata(
                         edition="acim-workbook-enhanced",
                         url=f"file://{self._path}",
-                        source_hash=self._source_hash,
+                        source_hash=lesson_source_hash,
                         rights_status="review_required",
                     ),
                     sentences=sentences,
@@ -134,22 +149,49 @@ class ACIMJsonSourceProvider:
         texts: list[str] = []
         if not isinstance(paragraphs, list):
             return texts
-        for para in paragraphs:
-            if isinstance(para, str):
-                texts.append(para)
-            elif isinstance(para, dict):
-                sents = para.get("sentences", [])
-                if isinstance(sents, list):
-                    para_text = " ".join(
-                        s.get("text", "") for s in sents if isinstance(s, dict)
-                    ).strip()
-                    if para_text:
-                        texts.append(para_text)
+        for paragraph in paragraphs:
+            if isinstance(paragraph, str):
+                if paragraph.strip():
+                    texts.append(paragraph.strip())
+                continue
+            if not isinstance(paragraph, dict):
+                continue
+            sentence_texts = self._extract_atomic_paragraph_sentences([paragraph])
+            if sentence_texts:
+                texts.append(" ".join(sentence_texts))
+                continue
+            direct_text = paragraph.get("text")
+            if isinstance(direct_text, str) and direct_text.strip():
+                texts.append(direct_text.strip())
         return texts
 
-    def _build_sentences(
-        self, raw: dict, lesson_number: int, paragraph_texts: list[str]
-    ) -> list[SourceSentence]:
+    def _extract_atomic_paragraph_sentences(self, paragraphs: object) -> list[str]:
+        texts: list[str] = []
+        if not isinstance(paragraphs, list):
+            return texts
+        for paragraph in paragraphs:
+            if isinstance(paragraph, str):
+                if paragraph.strip():
+                    texts.append(paragraph.strip())
+                continue
+            if not isinstance(paragraph, dict):
+                continue
+            sentence_items = paragraph.get("sentences", [])
+            if isinstance(sentence_items, list):
+                for sentence in sentence_items:
+                    if isinstance(sentence, str) and sentence.strip():
+                        texts.append(sentence.strip())
+                    elif isinstance(sentence, dict):
+                        value = sentence.get("text")
+                        if isinstance(value, str) and value.strip():
+                            texts.append(value.strip())
+            if not sentence_items:
+                direct_text = paragraph.get("text")
+                if isinstance(direct_text, str) and direct_text.strip():
+                    texts.append(direct_text.strip())
+        return texts
+
+    def _build_sentences(self, raw: dict, lesson_number: int) -> list[SourceSentence]:
         sentences: list[SourceSentence] = []
         sentence_id_counter = 0
 
@@ -168,34 +210,58 @@ class ACIMJsonSourceProvider:
             )
 
         title = raw.get("title_clean") or raw.get("title", "")
-        if title:
+        if isinstance(title, str) and title.strip():
             add_sentence(title, "title")
 
         idea = raw.get("idea_clean") or raw.get("idea", "")
-        if idea:
+        if isinstance(idea, str) and idea.strip():
             add_sentence(idea, "teaching")
 
-        for para_text in paragraph_texts:
-            if para_text.strip():
-                add_sentence(para_text.strip(), "teaching")
+        for text in self._extract_atomic_paragraph_sentences(raw.get("paragraphs", [])):
+            add_sentence(text, "teaching")
 
         practice_raw = raw.get("practice_instructions", {})
         if isinstance(practice_raw, dict):
-            desc = practice_raw.get("description", "")
-            if desc:
-                add_sentence(desc, "practice")
-            method = practice_raw.get("method", "")
-            if method:
-                add_sentence(method, "practice")
+            for field in ("description", "method"):
+                value = practice_raw.get(field, "")
+                if isinstance(value, str) and value.strip():
+                    add_sentence(value, "practice")
 
         prayer = raw.get("prayer", "")
-        if prayer and isinstance(prayer, str) and prayer.strip():
-            add_sentence(prayer.strip(), "prayer")
+        if isinstance(prayer, str) and prayer.strip():
+            add_sentence(prayer, "prayer")
 
         if not sentences:
-            add_sentence(f"Lesson {lesson_number}", "other")
-
+            raise ValueError(f"Lesson {lesson_number} contains no canonical source text")
         return sentences
+
+    def _lesson_hash(
+        self,
+        *,
+        lesson_number: int,
+        language: str,
+        title: str,
+        sentences: list[SourceSentence],
+        paragraphs: list[str],
+        practice_instructions: dict[str, str],
+        reviewed_lessons: object,
+    ) -> str:
+        payload = {
+            "lesson_number": lesson_number,
+            "language": language,
+            "title": title,
+            "sentences": [sentence.model_dump(mode="json") for sentence in sentences],
+            "paragraphs": paragraphs,
+            "practice_instructions": practice_instructions,
+            "reviewed_lessons": reviewed_lessons,
+        }
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 REVIEW_LESSON_RANGES = ((111, 120), (141, 150), (171, 180))

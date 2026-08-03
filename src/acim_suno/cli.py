@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -116,14 +117,15 @@ def command_normalize_styles(args: argparse.Namespace) -> int:
 
 def command_ingest_sources(args: argparse.Namespace) -> int:
     if args.source_type == "acim_json":
-        if not args.json:
-            raise ValueError("--json is required for acim_json source type")
-        provider = ACIMJsonSourceProvider(args.json, source_language=args.language)
+        source_json = args.json or os.environ.get("ACIM_WORKBOOK_JSON")
+        if not source_json:
+            raise ValueError("--json or ACIM_WORKBOOK_JSON is required for acim_json source type")
+        provider = ACIMJsonSourceProvider(source_json, source_language=args.language)
     else:
         provider = create_source_provider(
             source_type=args.source_type, source_language=args.language
         )
-    lessons = provider.fetch_lessons(args.min_lesson, args.max_lesson)
+    lessons = provider.fetch_lessons(args.min_lesson, args.max_lesson, language=args.language)
     dump_json(args.out, lessons)
     print(f"Ingested {len(lessons)} lessons to {args.out}")
     return 0
@@ -386,18 +388,23 @@ def command_run_batch(args: argparse.Namespace) -> int:
 
     llm = create_llm_provider(args.provider or "mock", args.model)
 
+    source_language = args.language or "en"
     if args.source_type == "acim_json":
-        if not args.source_json:
-            raise ValueError("--source-json required for acim_json source type")
-        source_provider = ACIMJsonSourceProvider(args.source_json)
+        source_json = args.source_json or os.environ.get("ACIM_WORKBOOK_JSON")
+        if not source_json:
+            raise ValueError(
+                "--source-json or ACIM_WORKBOOK_JSON required for acim_json source type"
+            )
+        source_provider = ACIMJsonSourceProvider(source_json, source_language=source_language)
     else:
         source_provider = create_source_provider(
             source_type=args.source_type,
-            source_language=args.language or "en",
+            source_language=source_language,
         )
     lessons = source_provider.fetch_lessons(
         args.lesson_start or pipeline_config.lesson_min,
         args.lesson_end or pipeline_config.lesson_max,
+        language=source_language,
     )
     print(f"Loaded {len(lessons)} lessons from source")
 
@@ -600,7 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ingest-sources
     ingest = subparsers.add_parser("ingest-sources")
-    ingest.add_argument("--source-type", default="pinecone", choices=["pinecone", "acim_json"])
+    ingest.add_argument("--source-type", default="acim_json", choices=["pinecone", "acim_json"])
     ingest.add_argument("--json", help="Path to ACIM JSON file (required for acim_json source)")
     ingest.add_argument("--language", default="en")
     ingest.add_argument("--out", default="outputs/lessons.json")
@@ -706,7 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--config", default="config/pipeline.example.yaml")
     batch.add_argument("--provider", default="mock")
     batch.add_argument("--model")
-    batch.add_argument("--source-type", default="pinecone", choices=["pinecone", "acim_json"])
+    batch.add_argument("--source-type", default="acim_json", choices=["pinecone", "acim_json"])
     batch.add_argument("--source-json", help="Path to ACIM JSON file (required for acim_json)")
     batch.add_argument("--language", default="en")
     batch.add_argument("--csv", default="outputs/acim_playlist/suno_metadata_songs.csv")
