@@ -436,6 +436,47 @@ def test_json_provider_uses_atomic_clean_sentences_and_per_lesson_hashes(tmp_pat
     assert lesson_122.source.source_hash != lesson_123.source.source_hash
 
 
+def test_json_provider_does_not_emit_idea_clean_as_duplicate_sentence(tmp_path: Path) -> None:
+    """idea_clean is fully represented by the title + atomic paragraph sentences.
+
+    Emitting it as a separate teaching "sentence" yields a giant duplicated
+    anchor (L122 previously had a 5,000+ char sentence repeated verbatim).
+    No sentence may be a superset of another.
+    """
+
+    def write(path: Path, idea_clean: str, sentences: list[str]) -> None:
+        payload = {
+            "language": "en",
+            "parts": {
+                "part_1": {
+                    "lessons": {
+                        "122": {
+                            "title_clean": "Lesson two-two title.",
+                            "idea_clean": idea_clean,
+                            "paragraphs": [{"sentences": [{"text": s} for s in sentences]}],
+                            "practice_instructions": {},
+                        },
+                    }
+                }
+            },
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    idea = "Lesson two-two title. First. Second. Third."
+    write(path := tmp_path / "wb.json", idea, ["First.", "Second.", "Third."])
+    lesson = ACIMJsonSourceProvider(path).fetch_lessons(122, 122)[0]
+
+    texts = [s.text for s in lesson.sentences]
+    assert idea not in texts  # the giant idea_clean sentence must not be emitted
+    assert texts == ["Lesson two-two title.", "First.", "Second.", "Third."]
+    # duplication signature: no sentence text is a strict superset of another
+    for text in texts:
+        for other in texts:
+            if text is other:
+                continue
+            assert text not in other
+
+
 def test_json_provider_hash_changes_with_canonical_lesson_text(tmp_path: Path) -> None:
     source_path = tmp_path / "workbook_enhanced.json"
     _write_canonical_workbook(source_path)

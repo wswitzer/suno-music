@@ -213,10 +213,6 @@ class ACIMJsonSourceProvider:
         if isinstance(title, str) and title.strip():
             add_sentence(title, "title")
 
-        idea = raw.get("idea_clean") or raw.get("idea", "")
-        if isinstance(idea, str) and idea.strip():
-            add_sentence(idea, "teaching")
-
         for text in self._extract_atomic_paragraph_sentences(raw.get("paragraphs", [])):
             add_sentence(text, "teaching")
 
