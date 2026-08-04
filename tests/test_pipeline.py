@@ -29,7 +29,10 @@ from acim_suno.models import (
     StyleRecord,
 )
 from acim_suno.optimizer import optimize_assignments
-from acim_suno.planner import choose_archetype
+from acim_suno.planner import (
+    baseline_archetype,
+    choose_archetypes_for_batch,
+)
 from acim_suno.repair import create_repair_request, repair_song
 from acim_suno.sources import (
     ACIMJsonSourceProvider,
@@ -317,48 +320,254 @@ def test_verbatim_validator_rejects_reordered_source_words_but_allows_repetition
     assert validate_verbatim_lyrics("I am safe. I am safe.", "I am safe.").passed
 
 
-def test_review_lessons_force_paired_review_archetype() -> None:
-    item = lesson(116).model_copy(update={"lesson_type": "review"})
-    profile = LessonAnalysisProfile(
-        lesson_number=116,
-        lesson_type="review",
-        ranked_archetypes=[SongArchetype.TITLE_TEACHING_PRAYER],
+def _profile(
+    number: int,
+    ranked: list[SongArchetype],
+    lesson_type: str = "standard",
+    repetition_affinity: float = 0.5,
+) -> LessonAnalysisProfile:
+    return LessonAnalysisProfile(
+        lesson_number=number,
+        language="en",
+        lesson_type=lesson_type,
+        ranked_archetypes=ranked,
+        repetition_affinity=repetition_affinity,
     )
-    assert choose_archetype(item, profile, MockLLMProvider()) is SongArchetype.PAIRED_REVIEW
 
 
-def test_covered_archetypes_surface_once_then_fall_back_to_top_rank() -> None:
-    from collections import Counter
+def _standard(number: int) -> LessonRecord:
+    return lesson(number).model_copy(update={"lesson_type": "standard"})
 
-    used = Counter()
-    top = SongArchetype.DECLARATION_DEVELOPMENT
-    profile = LessonAnalysisProfile(
-        lesson_number=121,
-        lesson_type="standard",
-        ranked_archetypes=[
-            top,
-            SongArchetype.SHORT_MANTRA,
-            SongArchetype.LONG_TEACHING,
-        ],
+
+def _review(number: int) -> LessonRecord:
+    return lesson(number).model_copy(update={"lesson_type": "review"})
+
+
+def _plan_map(lessons, profiles) -> dict[int, SongArchetype]:
+    llm = MockLLMProvider()
+    result = choose_archetypes_for_batch(lessons, profiles, llm)
+    return {number: result[(number, "en")] for number, _ in sorted(result)}
+
+
+def test_review_lessons_are_immutable_even_when_targets_are_ranked() -> None:
+    # A review lesson whose profile *does* rank the covered targets must still
+    # stay paired_review — coverage may never override review architecture.
+    lessons = [_review(116)]
+    profiles = [
+        _profile(
+            116,
+            [
+                SongArchetype.SHORT_MANTRA,
+                SongArchetype.LONG_TEACHING,
+                SongArchetype.PAIRED_REVIEW,
+            ],
+            lesson_type="review",
+        )
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[116] is SongArchetype.PAIRED_REVIEW
+
+
+def test_baseline_archetype_uses_top_rank_for_non_review() -> None:
+    llm = MockLLMProvider()
+    profile = _profile(
+        121,
+        [SongArchetype.DECLARATION_DEVELOPMENT, SongArchetype.SHORT_MANTRA],
     )
-    standard = lesson(121).model_copy(update={"lesson_type": "standard"})
+    assert (
+        baseline_archetype(_standard(121), profile, llm)
+        is SongArchetype.DECLARATION_DEVELOPMENT
+    )
+    # A review lesson is immutably paired_review regardless of the profile.
+    assert (
+        baseline_archetype(_review(116), profile, llm) is SongArchetype.PAIRED_REVIEW
+    )
 
-    first = choose_archetype(standard, profile, MockLLMProvider(), used=used)
-    used[first] += 1
-    # The first qualifying lesson surfaces a covered target rather than the top pick.
-    assert first in {
-        SongArchetype.SHORT_MANTRA,
-        SongArchetype.LONG_TEACHING,
-        top,
-    }
-    assert used[first] == 1
-    # Once every covered target has surfaced, later lessons go back to the
-    # best-fit top-ranked archetype (no frequency inflation).
-    used[SongArchetype.SHORT_MANTRA] += 1
-    used[SongArchetype.LONG_TEACHING] += 1
-    for _ in range(5):
-        pick = choose_archetype(standard, profile, MockLLMProvider(), used=used)
-        assert pick is top
+
+def test_batch_selector_is_order_independent() -> None:
+    lessons = [_standard(121), _standard(122), _standard(123)]
+    profiles = [
+        _profile(
+            121,
+            [
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+                SongArchetype.LONG_TEACHING,
+            ],
+        ),
+        _profile(
+            122,
+            [
+                SongArchetype.SPACIOUS_EXPERIENTIAL,
+                SongArchetype.LONG_TEACHING,
+                SongArchetype.SHORT_MANTRA,
+            ],
+        ),
+        _profile(
+            123,
+            [SongArchetype.PRACTICE_MEDITATION, SongArchetype.TITLE_TEACHING_PRAYER],
+        ),
+    ]
+    forward = _plan_map(lessons, profiles)
+    reverse = _plan_map(list(reversed(lessons)), profiles)
+    assert forward == reverse
+
+
+def test_naturally_top_ranked_covered_target_is_not_duplicated() -> None:
+    # 121 already top-ranks short_mantra: that is natural coverage. The batch
+    # selector must NOT inject another short_mantra elsewhere just for coverage.
+    lessons = [_standard(121), _standard(122)]
+    profiles = [
+        _profile(121, [SongArchetype.SHORT_MANTRA]),
+        _profile(
+            122,
+            [
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+            ],
+        ),
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[121] is SongArchetype.SHORT_MANTRA
+    assert mapping[122] is SongArchetype.DECLARATION_DEVELOPMENT
+    # short_mantra appears exactly once, naturally.
+    assert sum(1 for a in mapping.values() if a is SongArchetype.SHORT_MANTRA) == 1
+
+
+def test_best_eligible_candidate_wins_for_coverage() -> None:
+    # Lesson A ranks short_mantra #2; Lesson B ranks it #5. The coverage slot
+    # must go to A (best eligible lesson across the batch), not first-encountered.
+    lessons = [_standard(101), _standard(102)]
+    profiles = [
+        _profile(
+            101,
+            [
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+            ],
+        ),
+        _profile(
+            102,
+            [
+                SongArchetype.SPACIOUS_EXPERIENTIAL,
+                SongArchetype.PRACTICE_MEDITATION,
+                SongArchetype.TITLE_TEACHING_PRAYER,
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+            ],
+        ),
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[101] is SongArchetype.SHORT_MANTRA
+    assert mapping[102] is SongArchetype.SPACIOUS_EXPERIENTIAL
+
+
+def test_both_covered_targets_appear_when_distinct_candidates_exist() -> None:
+    lessons = [_standard(101), _standard(102)]
+    profiles = [
+        _profile(
+            101,
+            [
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+            ],
+        ),
+        _profile(
+            102,
+            [
+                SongArchetype.SPACIOUS_EXPERIENTIAL,
+                SongArchetype.LONG_TEACHING,
+            ],
+        ),
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[101] is SongArchetype.SHORT_MANTRA
+    assert mapping[102] is SongArchetype.LONG_TEACHING
+
+
+def test_collision_assigns_distinct_lessons_by_least_total_rank() -> None:
+    # Neither lesson naturally top-ranks a covered target. Both targets prefer
+    # different lessons, but the truly lowest-total-rank pairing must win:
+    # 101 -> short_mantra (rank 1) + 102 -> long_teaching (rank 1) = total 2
+    # beats 101 -> long_teaching (rank 2) + 102 -> short_mantra (rank 2) = 4.
+    lessons = [_standard(101), _standard(102)]
+    profiles = [
+        _profile(
+            101,
+            [
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+                SongArchetype.LONG_TEACHING,
+            ],
+        ),
+        _profile(
+            102,
+            [
+                SongArchetype.SPACIOUS_EXPERIENTIAL,
+                SongArchetype.LONG_TEACHING,
+                SongArchetype.SHORT_MANTRA,
+            ],
+        ),
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[101] is SongArchetype.SHORT_MANTRA
+    assert mapping[102] is SongArchetype.LONG_TEACHING
+
+
+def test_impossible_simultaneous_coverage_assigns_one_deterministically() -> None:
+    # Only lesson 101 ranks either target and it ranks short_mantra above
+    # long_teaching. The system must not assign two archetypes to one lesson;
+    # it promotes the stronger fit and leaves the other absent.
+    lessons = [_standard(101)]
+    profiles = [
+        _profile(
+            101,
+            [
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+                SongArchetype.LONG_TEACHING,
+            ],
+        )
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[101] is SongArchetype.SHORT_MANTRA
+
+
+def test_no_eligible_candidate_means_target_stays_absent() -> None:
+    # Nobody ranks long_teaching_compression. It must not be injected anywhere
+    # merely because it is a covered target.
+    lessons = [_standard(121), _standard(122)]
+    profiles = [
+        _profile(
+            121,
+            [
+                SongArchetype.DECLARATION_DEVELOPMENT,
+                SongArchetype.SHORT_MANTRA,
+            ],
+        ),
+        _profile(122, [SongArchetype.PRACTICE_MEDITATION]),
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[121] is SongArchetype.SHORT_MANTRA
+    assert mapping[122] is SongArchetype.PRACTICE_MEDITATION
+    assert all(a is not SongArchetype.LONG_TEACHING for a in mapping.values())
+
+
+def test_normal_choices_preserved_after_minimum_coverage() -> None:
+    # Once the two covered targets appear, unrelated lessons keep their own
+    # top-ranked archetype — no quota to fill.
+    lessons = [_standard(101), _standard(102), _standard(103)]
+    profiles = [
+        _profile(101, [SongArchetype.DECLARATION_DEVELOPMENT, SongArchetype.SHORT_MANTRA]),
+        _profile(102, [SongArchetype.SPACIOUS_EXPERIENTIAL, SongArchetype.LONG_TEACHING]),
+        _profile(103, [SongArchetype.PRACTICE_MEDITATION]),
+    ]
+    mapping = _plan_map(lessons, profiles)
+    assert mapping[101] is SongArchetype.SHORT_MANTRA
+    assert mapping[102] is SongArchetype.LONG_TEACHING
+    assert mapping[103] is SongArchetype.PRACTICE_MEDITATION
+    assert mapping[103] is not SongArchetype.SHORT_MANTRA
+    assert mapping[103] is not SongArchetype.LONG_TEACHING
 
 
 class CapturingScoreProvider(MockLLMProvider):
