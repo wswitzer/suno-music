@@ -327,6 +327,40 @@ def test_review_lessons_force_paired_review_archetype() -> None:
     assert choose_archetype(item, profile, MockLLMProvider()) is SongArchetype.PAIRED_REVIEW
 
 
+def test_covered_archetypes_surface_once_then_fall_back_to_top_rank() -> None:
+    from collections import Counter
+
+    used = Counter()
+    top = SongArchetype.DECLARATION_DEVELOPMENT
+    profile = LessonAnalysisProfile(
+        lesson_number=121,
+        lesson_type="standard",
+        ranked_archetypes=[
+            top,
+            SongArchetype.SHORT_MANTRA,
+            SongArchetype.LONG_TEACHING,
+        ],
+    )
+    standard = lesson(121).model_copy(update={"lesson_type": "standard"})
+
+    first = choose_archetype(standard, profile, MockLLMProvider(), used=used)
+    used[first] += 1
+    # The first qualifying lesson surfaces a covered target rather than the top pick.
+    assert first in {
+        SongArchetype.SHORT_MANTRA,
+        SongArchetype.LONG_TEACHING,
+        top,
+    }
+    assert used[first] == 1
+    # Once every covered target has surfaced, later lessons go back to the
+    # best-fit top-ranked archetype (no frequency inflation).
+    used[SongArchetype.SHORT_MANTRA] += 1
+    used[SongArchetype.LONG_TEACHING] += 1
+    for _ in range(5):
+        pick = choose_archetype(standard, profile, MockLLMProvider(), used=used)
+        assert pick is top
+
+
 class CapturingScoreProvider(MockLLMProvider):
     def __init__(self) -> None:
         super().__init__()

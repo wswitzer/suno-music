@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -197,6 +198,7 @@ def command_plan_lyrics(args: argparse.Namespace) -> int:
     profiles = load_models(args.profiles, LessonAnalysisProfile)
     llm = create_llm_provider(args.provider, args.model)
     plans = []
+    used = Counter()
     for lesson in lessons:
         matching = [
             p
@@ -205,10 +207,11 @@ def command_plan_lyrics(args: argparse.Namespace) -> int:
         ]
         profile = matching[0] if matching else None
         archetype = (
-            choose_archetype(lesson, profile, llm, args.prompt_version)
+            choose_archetype(lesson, profile, llm, args.prompt_version, used)
             if profile
             else "title_teaching_prayer"
         )
+        used[archetype] += 1
         plan = create_lyric_plan(lesson, archetype, llm, args.prompt_version)
         plans.append(plan)
     dump_json(args.out, plans)
