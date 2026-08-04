@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from acim_suno.cli import command_generate_lyrics
+from acim_suno.cli import command_generate_lyrics, command_plan_lyrics
 from acim_suno.extract_styles import extract_styles_from_csv
 from acim_suno.io import dump_json
 from acim_suno.llm import MockLLMProvider, generate_lyrics, score_compatibility, select_archetype
@@ -323,7 +323,7 @@ def test_verbatim_validator_rejects_reordered_source_words_but_allows_repetition
 def _profile(
     number: int,
     ranked: list[SongArchetype],
-    lesson_type: str = "standard",
+    lesson_type: LessonType = LessonType.STANDARD,
     repetition_affinity: float = 0.5,
 ) -> LessonAnalysisProfile:
     return LessonAnalysisProfile(
@@ -336,11 +336,11 @@ def _profile(
 
 
 def _standard(number: int) -> LessonRecord:
-    return lesson(number).model_copy(update={"lesson_type": "standard"})
+    return lesson(number).model_copy(update={"lesson_type": LessonType.STANDARD})
 
 
 def _review(number: int) -> LessonRecord:
-    return lesson(number).model_copy(update={"lesson_type": "review"})
+    return lesson(number).model_copy(update={"lesson_type": LessonType.REVIEW})
 
 
 def _plan_map(lessons, profiles) -> dict[int, SongArchetype]:
@@ -361,7 +361,7 @@ def test_review_lessons_are_immutable_even_when_targets_are_ranked() -> None:
                 SongArchetype.LONG_TEACHING,
                 SongArchetype.PAIRED_REVIEW,
             ],
-            lesson_type="review",
+            lesson_type=LessonType.REVIEW,
         )
     ]
     mapping = _plan_map(lessons, profiles)
@@ -568,6 +568,45 @@ def test_normal_choices_preserved_after_minimum_coverage() -> None:
     assert mapping[103] is SongArchetype.PRACTICE_MEDITATION
     assert mapping[103] is not SongArchetype.SHORT_MANTRA
     assert mapping[103] is not SongArchetype.LONG_TEACHING
+
+
+def test_plan_lyrics_command_matches_batch_selector(tmp_path: Path) -> None:
+    # command_plan_lyrics must defer to the same authoritative batch selector
+    # that run-batch uses, so coverage choices cannot diverge between paths.
+    lessons = [_standard(101), _standard(102)]
+    profiles = [
+        _profile(
+            101,
+            [SongArchetype.DECLARATION_DEVELOPMENT, SongArchetype.SHORT_MANTRA],
+        ),
+        _profile(
+            102,
+            [SongArchetype.SPACIOUS_EXPERIENTIAL, SongArchetype.LONG_TEACHING],
+        ),
+    ]
+    expected = choose_archetypes_for_batch(lessons, profiles, MockLLMProvider())
+
+    lessons_path = tmp_path / "lessons.json"
+    profiles_path = tmp_path / "profiles.json"
+    plans_path = tmp_path / "plans.json"
+    dump_json(lessons_path, lessons)
+    dump_json(profiles_path, profiles)
+
+    result = command_plan_lyrics(
+        Namespace(
+            lessons=str(lessons_path),
+            profiles=str(profiles_path),
+            provider="mock",
+            model=None,
+            prompt_version="0.1.0",
+            out=str(plans_path),
+        )
+    )
+    assert result == 0
+    plans = json.loads(plans_path.read_text(encoding="utf-8"))
+    got = {plan["lesson_number"]: SongArchetype(plan["archetype"]) for plan in plans}
+    expected_by_number = {number: archetype for (number, _lang), archetype in expected.items()}
+    assert got == expected_by_number
 
 
 class CapturingScoreProvider(MockLLMProvider):
