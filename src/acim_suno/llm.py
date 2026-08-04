@@ -391,6 +391,38 @@ def create_llm_provider(
     raise ValueError(f"Unknown provider: {provider}")
 
 
+# Stage -> default model policy. The A/B studies showed creative leverage is
+# concentrated in lyric planning (use the stronger model there), while Flash
+# executes analysis/scoring/adaptation/writing/repair efficiently. `--model`
+# on any command overrides its stage default; nothing here forces a global model.
+STAGE_MODEL_DEFAULTS: dict[str, str] = {
+    "analysis": "gemini-3.6-flash",
+    "compatibility": "gemini-3.6-flash",
+    "planning": "gemini-3.1-pro-preview",
+    "style_adaptation": "gemini-3.6-flash",
+    "lyric_writing": "gemini-3.6-flash",
+    "repair": "gemini-3.6-flash",
+}
+
+
+def create_stage_provider(
+    provider: str,
+    stage: str,
+    model: str | None = None,
+    prompt_version: str = "0.1.0",
+) -> LLMProvider:
+    """Build an LLMProvider bound to the model policy for `stage`.
+
+    `model` (passed from a `--model` flag) overrides the stage default; otherwise
+    the stage-specific default from STAGE_MODEL_DEFAULTS is used. Because the
+    provider's model_name flows into cache keys and request logs, a Pro-produced
+    upstream artifact can never be silently reused as a Flash one or vice versa.
+    """
+    if model is not None:
+        return create_llm_provider(provider, model)
+    return create_llm_provider(provider, STAGE_MODEL_DEFAULTS.get(stage))
+
+
 def analyze_lesson(
     lesson: LessonRecord,
     llm: LLMProvider,

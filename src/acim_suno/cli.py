@@ -13,7 +13,7 @@ from .generator import generate_song
 from .io import dump_json, load_env, load_jsonl_models, load_models, load_yaml
 from .llm import (
     analyze_lesson,
-    create_llm_provider,
+    create_stage_provider,
 )
 from .models import (
     AssignmentConstraints,
@@ -132,7 +132,7 @@ def command_ingest_sources(args: argparse.Namespace) -> int:
 
 def command_analyze_lessons(args: argparse.Namespace) -> int:
     lessons = load_models(args.input, LessonRecord)
-    llm = create_llm_provider(args.provider, args.model)
+    llm = create_stage_provider(args.provider, "analysis", args.model)
     profiles = []
     for lesson in lessons:
         profile = analyze_lesson(lesson, llm, prompt_version=args.prompt_version)
@@ -146,7 +146,7 @@ def command_score_compatibility(args: argparse.Namespace) -> int:
     lessons = load_models(args.lessons, LessonRecord)
     styles = load_models(args.styles, StyleRecord)
     profiles = load_models(args.profiles, LessonAnalysisProfile) if args.profiles else None
-    llm = create_llm_provider(args.provider, args.model)
+    llm = create_stage_provider(args.provider, "compatibility", args.model)
     scores = compute_compatibility_scores(
         lessons,
         styles,
@@ -194,7 +194,7 @@ def command_optimize(args: argparse.Namespace) -> int:
 def command_plan_lyrics(args: argparse.Namespace) -> int:
     lessons = load_models(args.lessons, LessonRecord)
     profiles = load_models(args.profiles, LessonAnalysisProfile)
-    llm = create_llm_provider(args.provider, args.model)
+    llm = create_stage_provider(args.provider, "planning", args.model)
     archetypes = choose_archetypes_for_batch(
         lessons, profiles, llm, args.prompt_version
     )
@@ -215,7 +215,7 @@ def command_adapt_styles(args: argparse.Namespace) -> int:
     plans = load_models(args.plans, LyricPlan)
     styles = load_models(args.styles, StyleRecord)
     assignments = load_models(args.assignments, AssignmentRecord)
-    llm = create_llm_provider(args.provider, args.model)
+    llm = create_stage_provider(args.provider, "style_adaptation", args.model)
 
     style_by_id = {s.style_id: s for s in styles}
     assignment_by_lesson = {(a.lesson_number, a.language): a for a in assignments}
@@ -245,7 +245,7 @@ def command_generate_lyrics(args: argparse.Namespace) -> int:
     lessons = load_models(args.lessons, LessonRecord)
     plans = load_models(args.plans, LyricPlan)
     adaptations = load_models(args.adaptations, StyleAdaptation)
-    llm = create_llm_provider(args.provider, args.model)
+    llm = create_stage_provider(args.provider, "lyric_writing", args.model)
 
     plan_by_lesson = {(p.lesson_number, p.language): p for p in plans}
     adapt_by_lesson = {a.lesson_number: a for a in adaptations}
@@ -296,7 +296,7 @@ def command_validate(args: argparse.Namespace) -> int:
 def command_repair(args: argparse.Namespace) -> int:
     artifacts = load_models(args.artifacts, SongArtifact)
     lessons = load_models(args.lessons, LessonRecord)
-    llm = create_llm_provider(args.provider, args.model)
+    llm = create_stage_provider(args.provider, "repair", args.model)
 
     lesson_by_number = {l.lesson_number: l for l in lessons}
     repaired_all: list[SongArtifact] = []
@@ -371,6 +371,19 @@ def command_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_stage_models(
+    cli_model: str | None,
+    config_models: dict[str, str],
+    stages: tuple[str, ...],
+) -> dict[str, str | None]:
+    """Resolve per-stage model overrides.
+
+    Precedence: explicit `--model` (CLI) > config `models:` section > stage default
+    (which `create_stage_provider` applies when the value is None).
+    """
+    return {stage: cli_model or config_models.get(stage) for stage in stages}
+
+
 def command_run_batch(args: argparse.Namespace) -> int:
     load_yaml(args.config)
     raw_config = load_yaml(args.config)
@@ -380,7 +393,30 @@ def command_run_batch(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir) if args.output_dir else Path("outputs")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    llm = create_llm_provider(args.provider or "mock", args.model)
+    stage_list = ("analysis", "compatibility", "planning", "style_adaptation", "lyric_writing")
+    stage_override = resolve_stage_models(args.model, pipeline_config.models, stage_list)
+    # Precedence: explicit --model (CLI) > config models: section > stage default.
+    analysis_llm = create_stage_provider(
+        args.provider or "mock", "analysis", stage_override["analysis"]
+    )
+    compatibility_llm = create_stage_provider(
+        args.provider or "mock",
+        "compatibility",
+        stage_override["compatibility"],
+    )
+    planning_llm = create_stage_provider(
+        args.provider or "mock", "planning", stage_override["planning"]
+    )
+    adaptation_llm = create_stage_provider(
+        args.provider or "mock",
+        "style_adaptation",
+        stage_override["style_adaptation"],
+    )
+    writing_llm = create_stage_provider(
+        args.provider or "mock",
+        "lyric_writing",
+        stage_override["lyric_writing"],
+    )
 
     source_language = args.language or "en"
     if args.source_type == "acim_json":
@@ -406,7 +442,7 @@ def command_run_batch(args: argparse.Namespace) -> int:
         print("Analyzing lessons...")
         profiles = []
         for lesson in lessons:
-            profile = analyze_lesson(lesson, llm)
+            profile = analyze_lesson(lesson, analysis_llm)
             profiles.append(profile)
         profile_path = output_dir / "profiles.json"
         dump_json(profile_path, profiles)
@@ -452,7 +488,7 @@ def command_run_batch(args: argparse.Namespace) -> int:
         scores = compute_compatibility_scores(
             lessons,
             styles,
-            llm,
+            compatibility_llm,
             cache_dir=str(output_dir / "scores"),
             profiles=profiles,
         )
@@ -495,13 +531,13 @@ def command_run_batch(args: argparse.Namespace) -> int:
             for lesson in lessons
             if assign_by_lesson.get((lesson.lesson_number, lesson.language))
         ]
-        archetypes = choose_archetypes_for_batch(planned_lessons, profiles, llm)
+        archetypes = choose_archetypes_for_batch(planned_lessons, profiles, planning_llm)
         plans = []
         for lesson in planned_lessons:
             archetype = archetypes.get((lesson.lesson_number, lesson.language))
             if archetype is None:
                 continue
-            plan = create_lyric_plan(lesson, archetype, llm)
+            plan = create_lyric_plan(lesson, archetype, planning_llm)
             plans.append(plan)
         dump_json(output_dir / "plans.json", plans)
 
@@ -520,7 +556,7 @@ def command_run_batch(args: argparse.Namespace) -> int:
                 if p.lesson_number == lesson.lesson_number and p.language == lesson.language
             ]
             plan = plan_matches[0] if plan_matches else None
-            adaptation = create_style_adaptation(lesson, style, plan, llm)
+            adaptation = create_style_adaptation(lesson, style, plan, adaptation_llm)
             adaptations.append(adaptation)
         dump_json(output_dir / "adaptations.json", adaptations)
 
@@ -537,7 +573,7 @@ def command_run_batch(args: argparse.Namespace) -> int:
             adaptation = adapt_matches[0] if adapt_matches else None
             if not (plan and adaptation):
                 continue
-            artifact = generate_song(lesson, plan, adaptation, llm)
+            artifact = generate_song(lesson, plan, adaptation, writing_llm)
             artifacts.append(artifact)
         dump_json(output_dir / "artifacts.json", artifacts)
 

@@ -276,6 +276,7 @@ class PipelineConfig(StrictModel):
     maximum_repair_attempts: int = 3
     style_registry_version: str = "0.1.0"
     assignment_version: str = "scipy-milp-0.1.0"
+    models: dict[str, str] = Field(default_factory=dict)
 
 
 class BatchExport(StrictModel):

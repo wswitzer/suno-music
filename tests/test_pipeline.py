@@ -10,7 +10,13 @@ import pytest
 from acim_suno.cli import command_generate_lyrics, command_plan_lyrics
 from acim_suno.extract_styles import extract_styles_from_csv
 from acim_suno.io import dump_json
-from acim_suno.llm import MockLLMProvider, generate_lyrics, score_compatibility, select_archetype
+from acim_suno.llm import (
+    STAGE_MODEL_DEFAULTS,
+    MockLLMProvider,
+    generate_lyrics,
+    score_compatibility,
+    select_archetype,
+)
 from acim_suno.models import (
     AssignmentConstraints,
     CompatibilityScore,
@@ -916,3 +922,49 @@ def test_repair_uses_structured_lyrics_wrapper() -> None:
     assert provider.response_model_seen is GeneratedLyricsResponse
     assert repaired is not None
     assert repaired_report.passed
+
+
+def test_stage_provider_uses_stage_default_model() -> None:
+    provider = __import__("acim_suno.llm", fromlist=["create_stage_provider"]).create_stage_provider(
+        "mock", "planning"
+    )
+    assert provider.model_name == STAGE_MODEL_DEFAULTS["planning"]
+
+
+def test_stage_provider_model_override_beats_stage_default() -> None:
+    create_stage_provider = __import__(
+        "acim_suno.llm", fromlist=["create_stage_provider"]
+    ).create_stage_provider
+    provider = create_stage_provider("mock", "planning", model="custom-9.9.9")
+    assert provider.model_name == "custom-9.9.9"
+
+
+def test_routing_planning_differs_from_writing() -> None:
+    create_stage_provider = __import__(
+        "acim_suno.llm", fromlist=["create_stage_provider"]
+    ).create_stage_provider
+    planner = create_stage_provider("mock", "planning")
+    writer = create_stage_provider("mock", "lyric_writing")
+    assert planner.model_name != writer.model_name
+
+
+def test_resolve_stage_models_precedence() -> None:
+    cli_resolve = __import__("acim_suno.cli", fromlist=["resolve_stage_models"]).resolve_stage_models
+    stages = ("analysis", "planning", "lyric_writing")
+    config = {"analysis": "config-flash", "planning": "config-pro"}
+
+    assert cli_resolve(None, config, stages) == {
+        "analysis": "config-flash",
+        "planning": "config-pro",
+        "lyric_writing": None,
+    }
+    assert cli_resolve("cli-pro", config, stages) == {
+        "analysis": "cli-pro",
+        "planning": "cli-pro",
+        "lyric_writing": "cli-pro",
+    }
+    assert cli_resolve(None, {}, stages) == {
+        "analysis": None,
+        "planning": None,
+        "lyric_writing": None,
+    }
