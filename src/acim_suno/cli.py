@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,7 +26,6 @@ from .models import (
     LyricPlan,
     NormalizedStyleRegistry,
     PipelineConfig,
-    SongArchetype,
     SongArtifact,
     StyleAdaptation,
     StyleRecord,
@@ -35,7 +33,7 @@ from .models import (
 )
 from .normalize_styles import extract_and_normalize_styles_pipeline, normalize_styles
 from .optimizer import AssignmentError, optimize_assignments
-from .planner import choose_archetype, create_lyric_plan
+from .planner import choose_archetypes_for_batch, create_lyric_plan
 from .repair import create_repair_request, repair_song
 from .scorer import compute_compatibility_scores
 from .sources import ACIMJsonSourceProvider, create_source_provider
@@ -197,21 +195,14 @@ def command_plan_lyrics(args: argparse.Namespace) -> int:
     lessons = load_models(args.lessons, LessonRecord)
     profiles = load_models(args.profiles, LessonAnalysisProfile)
     llm = create_llm_provider(args.provider, args.model)
+    archetypes = choose_archetypes_for_batch(
+        lessons, profiles, llm, args.prompt_version
+    )
     plans = []
-    used = Counter()
     for lesson in lessons:
-        matching = [
-            p
-            for p in profiles
-            if p.lesson_number == lesson.lesson_number and p.language == lesson.language
-        ]
-        profile = matching[0] if matching else None
-        archetype = (
-            choose_archetype(lesson, profile, llm, args.prompt_version, used)
-            if profile
-            else "title_teaching_prayer"
-        )
-        used[archetype] += 1
+        archetype = archetypes.get((lesson.lesson_number, lesson.language))
+        if archetype is None:
+            continue
         plan = create_lyric_plan(lesson, archetype, llm, args.prompt_version)
         plans.append(plan)
     dump_json(args.out, plans)
@@ -499,25 +490,17 @@ def command_run_batch(args: argparse.Namespace) -> int:
 
     if not args.dry_run:
         print("Planning lyrics...")
+        planned_lessons = [
+            lesson
+            for lesson in lessons
+            if assign_by_lesson.get((lesson.lesson_number, lesson.language))
+        ]
+        archetypes = choose_archetypes_for_batch(planned_lessons, profiles, llm)
         plans = []
-        for lesson in lessons:
-            match = assign_by_lesson.get((lesson.lesson_number, lesson.language))
-            if not match:
+        for lesson in planned_lessons:
+            archetype = archetypes.get((lesson.lesson_number, lesson.language))
+            if archetype is None:
                 continue
-            profile_matches = [
-                profile
-                for profile in profiles
-                if profile.lesson_number == lesson.lesson_number
-                and profile.language == lesson.language
-            ]
-            profile = profile_matches[0] if profile_matches else None
-            archetype = (
-                choose_archetype(lesson, profile, llm)
-                if profile is not None
-                else SongArchetype.PAIRED_REVIEW
-                if lesson.lesson_type.value == "review"
-                else SongArchetype.TITLE_TEACHING_PRAYER
-            )
             plan = create_lyric_plan(lesson, archetype, llm)
             plans.append(plan)
         dump_json(output_dir / "plans.json", plans)
