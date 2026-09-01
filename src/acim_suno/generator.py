@@ -3,9 +3,9 @@ from __future__ import annotations
 from .llm import LLMProvider, generate_lyrics
 from .models import (
     GeneratedLyric,
-    LessonRecord,
     LyricPlan,
     SongArtifact,
+    SourceUnit,
     StyleAdaptation,
 )
 
@@ -20,7 +20,7 @@ def build_full_lyrics_text(lyrics: list[GeneratedLyric]) -> str:
 
 
 def create_song_artifact(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     plan: LyricPlan,
     adaptation: StyleAdaptation,
     lyrics: list[GeneratedLyric],
@@ -30,6 +30,8 @@ def create_song_artifact(
 ) -> SongArtifact:
     full_text = build_full_lyrics_text(lyrics)
     return SongArtifact(
+        unit_ref=lesson.unit_ref,
+        sequence_index=lesson.sequence_index,
         lesson_number=lesson.lesson_number,
         title=lesson.title,
         archetype=plan.archetype,
@@ -47,7 +49,7 @@ def create_song_artifact(
 
 
 def generate_song(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     plan: LyricPlan,
     adaptation: StyleAdaptation,
     llm: LLMProvider,
