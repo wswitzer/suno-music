@@ -201,7 +201,7 @@ def command_plan_lyrics(args: argparse.Namespace) -> int:
         archetype = (
             choose_archetype(lesson, profile, llm, args.prompt_version)
             if profile
-            else "title_teaching_prayer"
+            else SongArchetype.TITLE_TEACHING_PRAYER
         )
         plan = create_lyric_plan(lesson, archetype, llm, args.prompt_version)
         plans.append(plan)
@@ -234,6 +234,8 @@ def command_adapt_styles(args: argparse.Namespace) -> int:
             if p.lesson_number == lesson.lesson_number and p.language == lesson.language
         ]
         plan = plan_matches[0] if plan_matches else None
+        if plan is None:
+            continue
         adaptation = create_style_adaptation(lesson, style, plan, llm, args.prompt_version)
         adaptations.append(adaptation)
     dump_json(args.out, adaptations)
@@ -372,12 +374,25 @@ def command_export(args: argparse.Namespace) -> int:
 
 
 def command_run_batch(args: argparse.Namespace) -> int:
-    load_yaml(args.config)
     raw_config = load_yaml(args.config)
     pipeline_config = PipelineConfig.model_validate(raw_config.get("project", raw_config))
     assignment_config = AssignmentConstraints.model_validate(raw_config.get("assignment", {}))
 
-    output_dir = Path(args.output_dir) if args.output_dir else Path("outputs")
+    book = args.book or "workbook"
+    if book == "text" and args.chapter is None:
+        raise ValueError("--chapter is required when --book text")
+    if book == "text" and args.source_type != "acim_json":
+        raise ValueError(
+            "Text chapter runs currently require --source-type acim_json until Text Pinecone "
+            "metadata ordering is verified"
+        )
+
+    default_output = (
+        Path("outputs") / "text" / f"chapter_{args.chapter}"
+        if book == "text"
+        else Path("outputs")
+    )
+    output_dir = Path(args.output_dir) if args.output_dir else default_output
     output_dir.mkdir(parents=True, exist_ok=True)
 
     llm = create_llm_provider(args.provider or "mock", args.model)
@@ -385,24 +400,31 @@ def command_run_batch(args: argparse.Namespace) -> int:
     if args.source_type == "acim_json":
         if not args.source_json:
             raise ValueError("--source-json required for acim_json source type")
-        source_provider = ACIMJsonSourceProvider(args.source_json)
+        source_provider = ACIMJsonSourceProvider(
+            args.source_json,
+            source_language=args.language or "en",
+        )
     else:
         source_provider = create_source_provider(
             source_type=args.source_type,
             source_language=args.language or "en",
         )
-    lessons = source_provider.fetch_lessons(
-        args.lesson_start or pipeline_config.lesson_min,
-        args.lesson_end or pipeline_config.lesson_max,
-    )
-    print(f"Loaded {len(lessons)} lessons from source")
+
+    if book == "text":
+        units = source_provider.fetch_text_chapter(args.chapter, language=args.language or "en")
+    else:
+        units = source_provider.fetch_lessons(
+            args.lesson_start or pipeline_config.lesson_min,
+            args.lesson_end or pipeline_config.lesson_max,
+            language=args.language or "en",
+        )
+    if not units:
+        raise ValueError(f"No {book} source units were loaded")
+    print(f"Loaded {len(units)} {book} source units")
 
     if not args.dry_run:
-        print("Analyzing lessons...")
-        profiles = []
-        for lesson in lessons:
-            profile = analyze_lesson(lesson, llm)
-            profiles.append(profile)
+        print("Analyzing source units...")
+        profiles = [analyze_lesson(unit, llm) for unit in units]
         profile_path = output_dir / "profiles.json"
         dump_json(profile_path, profiles)
         print(f"  Profiles saved to {profile_path}")
@@ -411,13 +433,27 @@ def command_run_batch(args: argparse.Namespace) -> int:
     styles = extract_and_normalize_styles_pipeline(csv_path, output_dir=str(output_dir / "styles"))
     print(f"Loaded {len(styles)} styles")
 
-    if len(lessons) < len(styles):
-        print(f"Fewer lessons ({len(lessons)}) than styles ({len(styles)}): relaxing constraints")
+    if len(units) < len(styles):
         assignment_config.minimum_style_usage = 0
-        assignment_config.maximum_style_usage = max(1, len(lessons))
-        assignment_config.maximum_consecutive_primary_bucket = max(len(lessons), 3)
-        if len(lessons) <= 10:
+        if book == "text":
+            assignment_config.maximum_style_usage = 1
             assignment_config.minimum_exact_style_gap = 0
+            assignment_config.maximum_consecutive_primary_bucket = min(
+                max(assignment_config.maximum_consecutive_primary_bucket, 2),
+                max(len(units), 2),
+            )
+            print(
+                f"Chapter has {len(units)} sections and {len(styles)} styles: "
+                "using distinct-style chapter constraints"
+            )
+        else:
+            print(
+                f"Fewer lessons ({len(units)}) than styles ({len(styles)}): relaxing constraints"
+            )
+            assignment_config.maximum_style_usage = max(1, len(units))
+            assignment_config.maximum_consecutive_primary_bucket = max(len(units), 3)
+            if len(units) <= 10:
+                assignment_config.minimum_exact_style_gap = 0
 
     if args.dry_run:
         print("DRY RUN: Skipping LLM scoring, using mock scores...")
@@ -425,8 +461,11 @@ def command_run_batch(args: argparse.Namespace) -> int:
 
         mock_scores = [
             CompatibilityScore(
-                lesson_number=l.lesson_number,
-                style_id=s.style_id,
+                unit_ref=unit.unit_ref,
+                sequence_index=unit.sequence_index,
+                lesson_number=unit.lesson_number,
+                language=unit.language,
+                style_id=style.style_id,
                 total=7.0,
                 dimensions={
                     "theme": 7.0,
@@ -438,20 +477,20 @@ def command_run_batch(args: argparse.Namespace) -> int:
                     "form": 7.0,
                 },
             )
-            for l in lessons
-            for s in styles
+            for unit in units
+            for style in styles
         ]
-        scores = filter_scores_for_optimizer(mock_scores, lessons, styles)
+        scores = filter_scores_for_optimizer(mock_scores, units, styles)
     else:
         print("Computing compatibility scores...")
         scores = compute_compatibility_scores(
-            lessons, styles, llm, cache_dir=str(output_dir / "scores")
+            units, styles, llm, cache_dir=str(output_dir / "scores")
         )
     print(f"  {len(scores)} scores computed")
 
     print("Running global optimizer...")
     assignments = optimize_assignments(
-        lessons,
+        units,
         styles,
         scores,
         assignment_config,
@@ -476,78 +515,79 @@ def command_run_batch(args: argparse.Namespace) -> int:
     )
     print(f"  Manifest saved to {manifest_path}")
 
-    style_by_id = {s.style_id: s for s in styles}
-    assign_by_lesson = {(a.lesson_number, a.language): a for a in assignments}
+    style_by_id = {style.style_id: style for style in styles}
+    assignment_by_unit = {(item.unit_ref, item.language): item for item in assignments}
 
     if not args.dry_run:
         print("Planning lyrics...")
+        profile_by_unit = {(profile.unit_ref, profile.language): profile for profile in profiles}
         plans = []
-        for lesson in lessons:
-            match = assign_by_lesson.get((lesson.lesson_number, lesson.language))
+        for unit in units:
+            match = assignment_by_unit.get((unit.unit_ref, unit.language))
             if not match:
                 continue
-            profile_matches = [p for p in profiles if p.lesson_number == lesson.lesson_number]
-            profile = profile_matches[0] if profile_matches else None
+            profile = profile_by_unit.get((unit.unit_ref, unit.language))
             archetype = (
-                profile.ranked_archetypes[0]
-                if (profile and profile.ranked_archetypes)
+                choose_archetype(unit, profile, llm)
+                if profile
                 else SongArchetype.TITLE_TEACHING_PRAYER
             )
-            plan = create_lyric_plan(lesson, archetype, llm)
-            plans.append(plan)
+            plans.append(create_lyric_plan(unit, archetype, llm))
         dump_json(output_dir / "plans.json", plans)
+        plan_by_unit = {(plan.unit_ref, plan.language): plan for plan in plans}
 
         print("Adapting styles...")
         adaptations = []
-        for lesson in lessons:
-            match = assign_by_lesson.get((lesson.lesson_number, lesson.language))
-            if not match:
+        for unit in units:
+            match = assignment_by_unit.get((unit.unit_ref, unit.language))
+            plan = plan_by_unit.get((unit.unit_ref, unit.language))
+            if not match or not plan:
                 continue
             style = style_by_id.get(match.style_id)
             if not style:
                 continue
-            plan_matches = [
-                p
-                for p in plans
-                if p.lesson_number == lesson.lesson_number and p.language == lesson.language
-            ]
-            plan = plan_matches[0] if plan_matches else None
-            adaptation = create_style_adaptation(lesson, style, plan, llm)
-            adaptations.append(adaptation)
+            adaptations.append(create_style_adaptation(unit, style, plan, llm))
         dump_json(output_dir / "adaptations.json", adaptations)
+        adaptation_by_unit = {
+            (adaptation.unit_ref, unit.language): adaptation
+            for adaptation in adaptations
+            for unit in units
+            if unit.unit_ref == adaptation.unit_ref
+        }
 
         print("Generating lyrics...")
         artifacts = []
-        for lesson in lessons:
-            plan_matches = [
-                p
-                for p in plans
-                if p.lesson_number == lesson.lesson_number and p.language == lesson.language
-            ]
-            adapt_matches = [a for a in adaptations if a.lesson_number == lesson.lesson_number]
-            plan = plan_matches[0] if plan_matches else None
-            adaptation = adapt_matches[0] if adapt_matches else None
+        for unit in units:
+            plan = plan_by_unit.get((unit.unit_ref, unit.language))
+            adaptation = adaptation_by_unit.get((unit.unit_ref, unit.language))
             if not (plan and adaptation):
                 continue
-            artifact = generate_song(lesson, plan, adaptation, llm)
-            artifacts.append(artifact)
+            artifacts.append(generate_song(unit, plan, adaptation, llm))
         dump_json(output_dir / "artifacts.json", artifacts)
 
         print("Validating and exporting...")
+        unit_by_ref = {(unit.unit_ref, unit.language): unit for unit in units}
         reports_list = []
-        for art in artifacts:
-            lesson = next((l for l in lessons if l.lesson_number == art.lesson_number), None)
-            if lesson:
+        for artifact in artifacts:
+            unit = unit_by_ref.get((artifact.unit_ref, artifact.language))
+            if unit:
                 reports_list.append(
-                    validate_verbatim_lyrics(art.full_lyrics_text, lesson.source_text)
+                    validate_verbatim_lyrics(artifact.full_lyrics_text, unit.source_text)
                 )
             else:
                 reports_list.append(ValidationReport(passed=True))
 
         export_suno_batch(artifacts, reports_list, output_dir=str(output_dir / "exports"))
+        if book == "text":
+            for artifact, validation in zip(artifacts, reports_list, strict=False):
+                export_lesson_folder(
+                    artifact,
+                    validation,
+                    output_dir=output_dir / "sections",
+                )
     else:
         print("DRY RUN: Pipeline complete (no lyrics generated)")
-        print(f"  Lessons: {len(lessons)}")
+        print(f"  Units: {len(units)}")
         print(f"  Styles: {len(styles)}")
         print(f"  Assignments: {len(assignments)}")
 
@@ -585,8 +625,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ingest-sources
     ingest = subparsers.add_parser("ingest-sources")
-    ingest.add_argument("--source-type", default="pinecone",
-                        choices=["pinecone", "acim_json"])
+    ingest.add_argument(
+        "--source-type", default="pinecone", choices=["pinecone", "acim_json"]
+    )
     ingest.add_argument("--json", help="Path to ACIM JSON file (required for acim_json source)")
     ingest.add_argument("--language", default="en")
     ingest.add_argument("--out", default="outputs/lessons.json")
@@ -691,14 +732,17 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("--config", default="config/pipeline.example.yaml")
     batch.add_argument("--provider", default="mock")
     batch.add_argument("--model")
-    batch.add_argument("--source-type", default="pinecone",
-                        choices=["pinecone", "acim_json"])
-    batch.add_argument("--source-json", help="Path to ACIM JSON file (required for acim_json)")
+    batch.add_argument("--book", choices=["workbook", "text"], default="workbook")
+    batch.add_argument(
+        "--source-type", default="pinecone", choices=["pinecone", "acim_json"]
+    )
+    batch.add_argument("--source-json", help="Path to approved ACIM structured JSON")
     batch.add_argument("--language", default="en")
     batch.add_argument("--csv", default="outputs/acim_playlist/suno_metadata_songs.csv")
+    batch.add_argument("--chapter", type=int, help="Text chapter number when --book text")
     batch.add_argument("--lesson-start", type=int, default=116)
     batch.add_argument("--lesson-end", type=int, default=120)
-    batch.add_argument("--output-dir", default="outputs")
+    batch.add_argument("--output-dir")
     batch.add_argument("--dry-run", action="store_true", help="Skip LLM calls, use mock scores")
     batch.set_defaults(handler=command_run_batch)
 
