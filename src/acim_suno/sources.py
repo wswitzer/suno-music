@@ -6,7 +6,13 @@ import os
 from pathlib import Path
 from typing import Protocol
 
-from .models import LessonRecord, LessonType, SourceMetadata, SourceSentence
+from .models import (
+    LessonRecord,
+    LessonType,
+    SourceMetadata,
+    SourceSentence,
+    TextSectionRecord,
+)
 
 
 class SourceProvider(Protocol):
@@ -52,16 +58,19 @@ class ACIMJsonSourceProvider:
     def get_source_hash(self) -> str:
         return self._source_hash
 
+    def _check_language(self, language: str) -> None:
+        if language != self._source_language:
+            raise ValueError(
+                f"Source provider is bound to {self._source_language!r}; requested {language!r}"
+            )
+
     def fetch_lessons(
         self,
         start: int = 116,
         end: int = 199,
         language: str = "en",
     ) -> list[LessonRecord]:
-        if language != self._source_language:
-            raise ValueError(
-                f"Source provider is bound to {self._source_language!r}; requested {language!r}"
-            )
+        self._check_language(language)
         parts = self._data.get("parts", {})
         all_lessons: dict[str, dict] = {}
         for part in parts.values():
@@ -127,6 +136,124 @@ class ACIMJsonSourceProvider:
                     reviewed_lessons=reviewed,
                 )
             )
+        return records
+
+    def fetch_text_chapter(
+        self,
+        chapter: int,
+        language: str = "en",
+    ) -> list[TextSectionRecord]:
+        """Load one Text chapter as one source unit per top-level section.
+
+        The expected structured shape is `chapters[chapter].sections[section]`
+        with section dictionaries containing `title`, `paragraphs`, and optional
+        `subsections`. Paragraph sentence boundaries are preserved.
+        """
+
+        self._check_language(language)
+        chapters = self._data.get("chapters", {})
+        raw_chapter = chapters.get(str(chapter)) if isinstance(chapters, dict) else None
+        if raw_chapter is None and isinstance(chapters, dict):
+            raw_chapter = chapters.get(chapter)
+        if not isinstance(raw_chapter, dict):
+            return []
+
+        raw_sections = raw_chapter.get("sections", {})
+        if not isinstance(raw_sections, dict):
+            return []
+
+        records: list[TextSectionRecord] = []
+        for sequence_index, (section_key, raw_section) in enumerate(raw_sections.items(), start=1):
+            if not isinstance(raw_section, dict):
+                continue
+            section = str(section_key)
+            unit_ref = f"T-{chapter}.{section}"
+            title = str(raw_section.get("title") or f"Section {section}").strip()
+            paragraphs_raw = raw_section.get("paragraphs", [])
+            paragraph_texts: list[str] = []
+            sentences: list[SourceSentence] = []
+
+            if title:
+                sentences.append(
+                    SourceSentence(
+                        sentence_id=f"{unit_ref}.title",
+                        text=title,
+                        category="title",
+                    )
+                )
+
+            if isinstance(paragraphs_raw, list):
+                for paragraph_index, paragraph in enumerate(paragraphs_raw, start=1):
+                    if isinstance(paragraph, str):
+                        text = paragraph.strip()
+                        if text:
+                            paragraph_texts.append(text)
+                            sentences.append(
+                                SourceSentence(
+                                    sentence_id=f"{unit_ref}.{paragraph_index}.1",
+                                    text=text,
+                                    category="teaching",
+                                )
+                            )
+                        continue
+                    if not isinstance(paragraph, dict):
+                        continue
+
+                    paragraph_number = paragraph.get("number", paragraph_index)
+                    paragraph_ref = str(
+                        paragraph.get("reference") or f"{unit_ref}.{paragraph_number}"
+                    )
+                    sentence_items = paragraph.get("sentences", [])
+                    paragraph_sentences: list[str] = []
+                    if isinstance(sentence_items, list):
+                        for sentence_index, sentence in enumerate(sentence_items, start=1):
+                            if isinstance(sentence, str):
+                                sentence_text = sentence.strip()
+                                sentence_number = sentence_index
+                            elif isinstance(sentence, dict):
+                                sentence_text = str(sentence.get("text") or "").strip()
+                                sentence_number = sentence.get("number", sentence_index)
+                            else:
+                                continue
+                            if not sentence_text:
+                                continue
+                            paragraph_sentences.append(sentence_text)
+                            sentences.append(
+                                SourceSentence(
+                                    sentence_id=f"{paragraph_ref}.{sentence_number}",
+                                    text=sentence_text,
+                                    category="teaching",
+                                )
+                            )
+                    paragraph_text = " ".join(paragraph_sentences).strip()
+                    if paragraph_text:
+                        paragraph_texts.append(paragraph_text)
+
+            if not sentences:
+                continue
+
+            raw_subsections = raw_section.get("subsections", {})
+            subsections = raw_subsections if isinstance(raw_subsections, dict) else {}
+            records.append(
+                TextSectionRecord(
+                    unit_ref=unit_ref,
+                    sequence_index=sequence_index,
+                    language=language,
+                    title=title,
+                    source=SourceMetadata(
+                        edition="acim-text-structured",
+                        url=f"file://{self._path}",
+                        source_hash=self._source_hash,
+                        rights_status="review_required",
+                    ),
+                    sentences=sentences,
+                    paragraphs=paragraph_texts,
+                    chapter=chapter,
+                    section=section,
+                    subsections=subsections,
+                )
+            )
+
         return records
 
     def _extract_paragraph_texts(self, paragraphs: list) -> list[str]:

@@ -130,13 +130,13 @@ def validate_assignment_batch(
             )
 
     by_language: dict[str, list[AssignmentRecord]] = {}
-    for item in sorted(assignments, key=lambda x: (x.language, x.lesson_number)):
+    for item in sorted(assignments, key=lambda x: (x.language, x.sequence_index, x.unit_ref)):
         by_language.setdefault(item.language, []).append(item)
 
     for language, items in by_language.items():
         for left_index, left in enumerate(items):
             for right in items[left_index + 1 :]:
-                gap = right.lesson_number - left.lesson_number
+                gap = right.sequence_index - left.sequence_index
                 if gap >= constraints.minimum_exact_style_gap:
                     break
                 if left.style_id == right.style_id:
@@ -144,8 +144,8 @@ def validate_assignment_batch(
                         ValidationIssue(
                             code="exact_style_gap",
                             message=(
-                                f"{left.style_id} repeats at lessons "
-                                f"{left.lesson_number} and {right.lesson_number} ({language})"
+                                f"{left.style_id} repeats at units "
+                                f"{left.unit_ref} and {right.unit_ref} ({language})"
                             ),
                         )
                     )

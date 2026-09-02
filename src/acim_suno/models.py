@@ -10,6 +10,11 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class UnitType(StrEnum):
+    WORKBOOK_LESSON = "workbook_lesson"
+    TEXT_SECTION = "text_section"
+
+
 class LyricPolicy(StrEnum):
     VERBATIM_ONLY = "verbatim_only"
     VERBATIM_ANCHORS = "verbatim_anchors"
@@ -20,6 +25,7 @@ class LessonType(StrEnum):
     STANDARD = "standard"
     REVIEW = "review"
     EXPERIENTIAL = "experiential"
+    TEXT_SECTION = "text_section"
 
 
 class SongArchetype(StrEnum):
@@ -30,6 +36,30 @@ class SongArchetype(StrEnum):
     SHORT_MANTRA = "short_mantra"
     LONG_TEACHING = "long_teaching_compression"
     SPACIOUS_EXPERIENTIAL = "spacious_experiential"
+
+
+class UnitIdentity(StrictModel):
+    """Stable generic identity for a Workbook lesson or Text section.
+
+    `lesson_number` remains as a backwards-compatible Workbook field. Generic
+    code should join on `unit_ref` and order on `sequence_index`.
+    """
+
+    unit_ref: str = ""
+    sequence_index: int = Field(default=0, ge=0)
+    lesson_number: int | None = Field(default=None, ge=1, le=365)
+
+    @model_validator(mode="after")
+    def populate_workbook_identity(self) -> UnitIdentity:
+        if not self.unit_ref and self.lesson_number is not None:
+            self.unit_ref = f"L{self.lesson_number}"
+        if self.sequence_index == 0 and self.lesson_number is not None:
+            self.sequence_index = self.lesson_number
+        if not self.unit_ref:
+            raise ValueError("unit_ref is required when lesson_number is absent")
+        if self.sequence_index < 1:
+            raise ValueError("sequence_index must be at least 1")
+        return self
 
 
 class SourceSentence(StrictModel):
@@ -47,20 +77,34 @@ class SourceMetadata(StrictModel):
     )
 
 
-class LessonRecord(StrictModel):
-    lesson_number: int = Field(ge=1, le=365)
+class SourceUnit(UnitIdentity):
+    unit_type: UnitType = UnitType.WORKBOOK_LESSON
     language: str = Field(pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
     title: str = Field(min_length=1)
     lesson_type: LessonType = LessonType.STANDARD
     source: SourceMetadata
     sentences: list[SourceSentence] = Field(min_length=1)
     paragraphs: list[str] = Field(default_factory=list)
-    practice_instructions: dict[str, str] = Field(default_factory=dict)
-    reviewed_lessons: list[dict] | None = None
 
     @property
     def source_text(self) -> str:
         return "\n".join(sentence.text for sentence in self.sentences)
+
+
+class LessonRecord(SourceUnit):
+    lesson_number: int = Field(ge=1, le=365)
+    unit_type: UnitType = UnitType.WORKBOOK_LESSON
+    practice_instructions: dict[str, str] = Field(default_factory=dict)
+    reviewed_lessons: list[dict] | None = None
+
+
+class TextSectionRecord(SourceUnit):
+    lesson_number: None = None
+    unit_type: UnitType = UnitType.TEXT_SECTION
+    lesson_type: LessonType = LessonType.TEXT_SECTION
+    chapter: int = Field(ge=1)
+    section: str = Field(min_length=1)
+    subsections: dict[str, object] = Field(default_factory=dict)
 
 
 class StyleRecord(StrictModel):
@@ -99,8 +143,7 @@ class NormalizedStyleRegistry(StrictModel):
     source_csv_hash: str | None = None
 
 
-class CompatibilityScore(StrictModel):
-    lesson_number: int
+class CompatibilityScore(UnitIdentity):
     language: str = "en"
     style_id: str
     total: float = Field(ge=0, le=10)
@@ -110,7 +153,7 @@ class CompatibilityScore(StrictModel):
 
 
 class CompatibilityScoreBatch(RootModel[list[CompatibilityScore]]):
-    """Structured-output wrapper for one lesson's style scores."""
+    """Structured-output wrapper for one source unit's style scores."""
 
 
 class SongArchetypeSelection(StrictModel):
@@ -133,8 +176,7 @@ class AssignmentConstraints(StrictModel):
         return self
 
 
-class AssignmentRecord(StrictModel):
-    lesson_number: int
+class AssignmentRecord(UnitIdentity):
     language: str
     style_id: str
     primary_bucket: str
@@ -149,9 +191,8 @@ class AssignmentManifest(StrictModel):
     constraints: AssignmentConstraints
 
 
-class StyleAdaptation(StrictModel):
+class StyleAdaptation(UnitIdentity):
     style_id: str
-    lesson_number: int
     core_prompt: str
     adaptation: str
     final_prompt: str
@@ -159,8 +200,7 @@ class StyleAdaptation(StrictModel):
     core_identity_preserved: bool = True
 
 
-class LessonAnalysisProfile(StrictModel):
-    lesson_number: int
+class LessonAnalysisProfile(UnitIdentity):
     language: str = "en"
     lesson_type: LessonType
     themes: list[str] = Field(default_factory=list)
@@ -187,8 +227,7 @@ class PlanSection(StrictModel):
     repetition_count: int = 1
 
 
-class LyricPlan(StrictModel):
-    lesson_number: int
+class LyricPlan(UnitIdentity):
     language: str = "en"
     archetype: SongArchetype
     sections: list[PlanSection]
@@ -205,8 +244,7 @@ class GeneratedLyricsResponse(RootModel[list[GeneratedLyric]]):
     """Structured-output wrapper for generated lyric sections."""
 
 
-class SongArtifact(StrictModel):
-    lesson_number: int
+class SongArtifact(UnitIdentity):
     title: str
     archetype: SongArchetype
     lesson_type: LessonType
@@ -225,8 +263,7 @@ class SongArtifact(StrictModel):
         return len(self.full_lyrics_text.split())
 
 
-class TargetedRepairRequest(StrictModel):
-    lesson_number: int
+class TargetedRepairRequest(UnitIdentity):
     language: str = "en"
     failed_fields: list[str] = Field(default_factory=list)
     validator_report: ValidationReport | None = None
@@ -236,8 +273,7 @@ class TargetedRepairRequest(StrictModel):
     error_messages: list[str] = Field(default_factory=list)
 
 
-class FinalSongArtifact(StrictModel):
-    lesson_number: int
+class FinalSongArtifact(UnitIdentity):
     language: str = "en"
     title: str
     style_id: str
@@ -285,3 +321,7 @@ class BatchExport(StrictModel):
     total_lessons: int
     passed_count: int
     failed_count: int
+
+    @property
+    def total_units(self) -> int:
+        return self.total_lessons

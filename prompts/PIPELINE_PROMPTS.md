@@ -2,15 +2,15 @@
 
 ## Style annotator
 
-Normalize one curated Suno prompt into `StyleRecord`. Preserve `core_prompt` exactly. Add buckets, energy, tempo range, lyric density, spoken-word support, repetition affinity, vocal clarity, tags, locked traits, mutable traits, and risks. Identify lesson-specific clauses without silently rewriting the core. Output JSON only.
+Normalize one curated Suno prompt into `StyleRecord`. Preserve `core_prompt` exactly. Add buckets, energy, tempo range, lyric density, spoken-word support, repetition affinity, vocal clarity, tags, locked traits, mutable traits, and risks. Identify source-specific clauses without silently rewriting the core. Output JSON only.
 
 ## Lesson analyzer
 
-Analyze only the supplied approved source. Return lesson type, themes, emotional start/destination, energy target, lyric density, repetition affinity, spoken-word need, clarity requirement, preferred arc, suitable/unsuitable traits, categorized source sentence IDs, and ranked song archetypes. Do not assign a style or write lyrics. Output JSON only.
+Analyze only the supplied approved ACIM source unit, which may be a Workbook lesson or Text section. Return content type, themes, emotional start/destination, energy target, lyric density, repetition affinity, spoken-word need, clarity requirement, preferred arc, suitable/unsuitable traits, and ranked song archetypes. Do not assign a style or write lyrics. Output JSON only.
 
 ## Compatibility scorer
 
-Score each supplied lesson-style pair from 0–10. Weight thematic/emotional fit 30%, energy 20%, lyric density 15%, repetition 10%, vocal clarity 10%, emotional arc 10%, and song-form fit 5%. Do not choose a winner or default to ambient/chant. Output compact JSON records only.
+Score each supplied source-unit/style pair from 0–10. Weight thematic/emotional fit 30%, energy 20%, lyric density 15%, repetition 10%, vocal clarity 10%, emotional arc 10%, and song-form fit 5%. Do not choose a winner or default to ambient/chant. Output compact JSON records only.
 
 ## Archetype selector
 
@@ -24,11 +24,13 @@ Choose one:
 6. `long_teaching_compression`
 7. `spacious_experiential`
 
-The Lesson 338 mantra/spoken-teaching/prayer form is optional, not universal. Review lessons must preserve both reviewed ideas.
+The Lesson 338 mantra/spoken-teaching/prayer form is optional, not universal. Review lessons must preserve both reviewed ideas. `paired_review` is Workbook-specific and must not be selected for Text sections.
 
 ## Lyric planner
 
-Create a section plan, not lyrics. For each section provide label, function, approved source IDs, sung/spoken/instrumental treatment, and repetition count. Under `verbatim_only`, do not propose paraphrases, invented ad-libs, reordered words, or shortened meanings. A short chant must be a contiguous source phrase.
+Create a section plan, not lyrics. For each song section provide label, function, approved source IDs, sung/spoken/instrumental treatment, and repetition count. Under `verbatim_only`, do not propose paraphrases, invented ad-libs, reordered words, or shortened meanings. A short chant must be a contiguous source phrase.
+
+For long Text sections, do not try to sing the whole source. Select representative verbatim passages across the teaching arc when available: opening/setup, central teaching, major contrast or turning point, and resolution/conclusion. One top-level Text section should remain one song unless an explicit higher-level decision splits it.
 
 ## Bounded style adapter
 
@@ -36,7 +38,7 @@ Append a concise adaptation to the immutable core. Allowed: BPM within range, vo
 
 ## Lyric writer
 
-Write from the approved plan and source IDs. Under `verbatim_only`, every sung or spoken phrase—including parenthetical ad-libs—must occur contiguously in the source. Repetition and line-break changes are allowed; additions, substitutions, deletions, and word rearrangement are not. Use conservative Suno labels. Keep production prose in the style field, not the lyrics field.
+Write from the approved plan and source IDs. Under `verbatim_only`, every sung or spoken phrase must occur contiguously in the source. Repetition and line-break changes are allowed; additions, substitutions, deletions, and word rearrangement are not. Use conservative Suno section labels. Keep production prose in the style field, not the lyrics field.
 
 ## Targeted repair
 

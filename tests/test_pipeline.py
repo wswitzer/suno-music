@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from acim_suno.models import (
     SourceSentence,
     StyleAdaptation,
     StyleRecord,
+    TextSectionRecord,
+    UnitType,
 )
 from acim_suno.optimizer import optimize_assignments
 from acim_suno.sources import ACIMJsonSourceProvider
@@ -46,6 +49,36 @@ def lesson(number: int) -> LessonRecord:
         ),
         sentences=[SourceSentence(sentence_id="title", text=f"Demo {number}")],
     )
+
+
+def text_section(section: str, sequence_index: int) -> TextSectionRecord:
+    unit_ref = f"T-27.{section}"
+    return TextSectionRecord(
+        unit_ref=unit_ref,
+        sequence_index=sequence_index,
+        language="en",
+        title=f"Synthetic section {section}",
+        source=SourceMetadata(
+            edition="synthetic-text",
+            source_hash=f"synthetic-{section}",
+            rights_status="user_supplied",
+        ),
+        sentences=[
+            SourceSentence(
+                sentence_id=f"{unit_ref}.1.1",
+                text=f"Synthetic teaching {section}.",
+            )
+        ],
+        chapter=27,
+        section=section,
+    )
+
+
+def test_workbook_identity_is_derived() -> None:
+    item = lesson(116)
+    assert item.unit_ref == "L116"
+    assert item.sequence_index == 116
+    assert item.unit_type == UnitType.WORKBOOK_LESSON
 
 
 def test_global_optimizer_uses_all_styles() -> None:
@@ -78,6 +111,97 @@ def test_global_optimizer_uses_all_styles() -> None:
     assert report.passed, report.model_dump()
     assert {item.style_id for item in assignments} == {"A", "B", "C"}
     assert sum(item.fit_score for item in assignments) >= 35.0
+
+
+def test_text_chapter_ingestion_preserves_sentence_boundaries(tmp_path: Path) -> None:
+    source_path = tmp_path / "text.json"
+    source_path.write_text(
+        json.dumps(
+            {
+                "language": "en",
+                "chapters": {
+                    "27": {
+                        "sections": {
+                            "I": {
+                                "title": "Synthetic section one",
+                                "paragraphs": [
+                                    {
+                                        "reference": "T-27.I.1",
+                                        "number": 1,
+                                        "sentences": [
+                                            {"number": 1, "text": "First synthetic sentence."},
+                                            {"number": 2, "text": "Second synthetic sentence."},
+                                        ],
+                                    }
+                                ],
+                                "subsections": {},
+                            },
+                            "II": {
+                                "title": "Synthetic section two",
+                                "paragraphs": [
+                                    {
+                                        "reference": "T-27.II.1",
+                                        "number": 1,
+                                        "sentences": [
+                                            {"number": 1, "text": "Third synthetic sentence."}
+                                        ],
+                                    }
+                                ],
+                                "subsections": {},
+                            },
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    records = ACIMJsonSourceProvider(source_path).fetch_text_chapter(27)
+
+    assert [record.unit_ref for record in records] == ["T-27.I", "T-27.II"]
+    assert [record.sequence_index for record in records] == [1, 2]
+    assert records[0].unit_type == UnitType.TEXT_SECTION
+    assert [sentence.sentence_id for sentence in records[0].sentences] == [
+        "T-27.I.title",
+        "T-27.I.1.1",
+        "T-27.I.1.2",
+    ]
+    assert records[0].paragraphs == ["First synthetic sentence. Second synthetic sentence."]
+
+
+def test_text_chapter_optimizer_can_use_distinct_styles() -> None:
+    units = [text_section("I", 1), text_section("II", 2), text_section("III", 3)]
+    styles = [
+        StyleRecord(style_id=f"S{index}", name=f"Style {index}", core_prompt=f"Prompt {index}")
+        for index in range(1, 6)
+    ]
+    scores = [
+        CompatibilityScore(
+            unit_ref=unit.unit_ref,
+            sequence_index=unit.sequence_index,
+            style_id=style.style_id,
+            total=10.0 if style.style_id == f"S{unit.sequence_index}" else 5.0,
+        )
+        for unit in units
+        for style in styles
+    ]
+    constraints = AssignmentConstraints(
+        minimum_style_usage=0,
+        maximum_style_usage=1,
+        minimum_exact_style_gap=0,
+        maximum_consecutive_primary_bucket=3,
+    )
+
+    assignments = optimize_assignments(units, styles, scores, constraints)
+
+    assert [assignment.unit_ref for assignment in assignments] == [
+        "T-27.I",
+        "T-27.II",
+        "T-27.III",
+    ]
+    assert len({assignment.style_id for assignment in assignments}) == 3
+    assert {assignment.style_id for assignment in assignments} == {"S1", "S2", "S3"}
 
 
 def test_verbatim_validator_rejects_invented_adlib() -> None:
@@ -184,6 +308,18 @@ def test_high_level_llm_calls_use_pydantic_wrappers() -> None:
     )
     lyrics = generate_lyrics(item, plan, adaptation, llm)
     assert GeneratedLyricsResponse(lyrics).root == lyrics
+
+
+def test_text_section_llm_scores_keep_unit_identity() -> None:
+    llm = MockLLMProvider()
+    unit = text_section("I", 1)
+    style = StyleRecord(style_id="STYLE_1", name="Demo", core_prompt="Warm acoustic folk.")
+
+    scores = score_compatibility(unit, [style], llm)
+
+    assert scores[0].unit_ref == "T-27.I"
+    assert scores[0].sequence_index == 1
+    assert scores[0].lesson_number is None
 
 
 def test_staged_generate_lyrics_command_uses_plan_language(tmp_path: Path) -> None:

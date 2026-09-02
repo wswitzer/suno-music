@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,13 +16,14 @@ from .models import (
     GeneratedLyric,
     GeneratedLyricsResponse,
     LessonAnalysisProfile,
-    LessonRecord,
     LyricPlan,
     PlanSection,
     SongArchetype,
     SongArchetypeSelection,
+    SourceUnit,
     StyleAdaptation,
     StyleRecord,
+    UnitType,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -98,6 +100,32 @@ def _load_prompt_section(section_key: str) -> str:
     return _PROMPTS_CACHE.get(section_key, "")
 
 
+def _unit_context(unit: SourceUnit) -> str:
+    lesson_line = (
+        f"Lesson number: {unit.lesson_number}\n" if unit.lesson_number is not None else ""
+    )
+    return (
+        f"Unit ref: {unit.unit_ref}\n"
+        f"Sequence index: {unit.sequence_index}\n"
+        f"Unit type: {unit.unit_type.value}\n"
+        f"{lesson_line}"
+        f"Title: {unit.title}\n"
+        f"Content type: {unit.lesson_type.value}\n"
+    )
+
+
+def _identity_from_prompt(user_prompt: str) -> tuple[str, int, int | None]:
+    unit_match = re.search(r"Unit ref:\s*([^\s]+)", user_prompt)
+    seq_match = re.search(r"Sequence index:\s*(\d+)", user_prompt)
+    lesson_match = re.search(r"Lesson number:\s*(\d+)", user_prompt)
+    if lesson_match is None:
+        lesson_match = re.search(r"Lesson\s+(\d+)", user_prompt)
+    lesson_number = int(lesson_match.group(1)) if lesson_match else None
+    unit_ref = unit_match.group(1) if unit_match else (f"L{lesson_number}" if lesson_number else "L116")
+    sequence_index = int(seq_match.group(1)) if seq_match else (lesson_number or 116)
+    return unit_ref, sequence_index, lesson_number
+
+
 class MockLLMProvider(LLMProvider):
     def __init__(self, model: str = "mock-0.1.0") -> None:
         self._model = model
@@ -130,9 +158,13 @@ class MockLLMProvider(LLMProvider):
         raise ValueError(msg)
 
     def _mock_analysis(self, user_prompt: str) -> LessonAnalysisProfile:
+        unit_ref, sequence_index, lesson_number = _identity_from_prompt(user_prompt)
+        lesson_type = "text_section" if "Unit type: text_section" in user_prompt else "standard"
         return LessonAnalysisProfile(
-            lesson_number=116,
-            lesson_type="standard",
+            unit_ref=unit_ref,
+            sequence_index=sequence_index,
+            lesson_number=lesson_number,
+            lesson_type=lesson_type,
             themes=["forgiveness", "peace"],
             emotional_start="confusion",
             emotional_destination="clarity",
@@ -150,20 +182,19 @@ class MockLLMProvider(LLMProvider):
         )
 
     def _mock_scores(self, user_prompt: str) -> list[CompatibilityScore]:
-        import re
-
-        lesson_match = re.search(r"Lesson\s+(\d+):", user_prompt)
-        lesson_number = int(lesson_match.group(1)) if lesson_match else 116
+        unit_ref, sequence_index, lesson_number = _identity_from_prompt(user_prompt)
         style_ids = re.findall(r"style_id=([^\s,]+)", user_prompt)
         styles_found = sorted(set(style_ids))
 
         scores = []
-        for si, sid in enumerate(styles_found):
-            score = min(10.0, max(0.0, 7.0 + (si % 3) * 0.5 - (lesson_number % 5) * 0.2))
+        for si, style_id in enumerate(styles_found):
+            score = min(10.0, max(0.0, 7.0 + (si % 3) * 0.5 - (sequence_index % 5) * 0.2))
             scores.append(
                 CompatibilityScore(
+                    unit_ref=unit_ref,
+                    sequence_index=sequence_index,
                     lesson_number=lesson_number,
-                    style_id=sid,
+                    style_id=style_id,
                     total=round(score, 1),
                     dimensions={
                         "theme": round(score, 1),
@@ -179,106 +210,84 @@ class MockLLMProvider(LLMProvider):
         return scores
 
     def _mock_plan(self, user_prompt: str) -> LyricPlan:
-        import re
-
-        lesson_match = re.search(r"Lesson\s+(\d+):", user_prompt)
-        lesson_number = int(lesson_match.group(1)) if lesson_match else 116
+        unit_ref, sequence_index, lesson_number = _identity_from_prompt(user_prompt)
+        sentence_ids = re.findall(r"^\s+([^\s]+) \[[^\]]+\]:", user_prompt, re.MULTILINE)
+        first = sentence_ids[0] if sentence_ids else f"{unit_ref}.title"
+        teaching = sentence_ids[1:3] or [first]
         return LyricPlan(
+            unit_ref=unit_ref,
+            sequence_index=sequence_index,
             lesson_number=lesson_number,
             archetype=SongArchetype.TITLE_TEACHING_PRAYER,
             sections=[
                 PlanSection(
                     label="Intro",
                     function="setting",
-                    source_sentence_ids=["L116_001"],
+                    source_sentence_ids=[first],
                     treatment="instrumental",
                 ),
                 PlanSection(
                     label="Verse 1",
                     function="teaching",
-                    source_sentence_ids=["L116_002", "L116_003"],
+                    source_sentence_ids=teaching,
                     treatment="sung",
                     repetition_count=1,
                 ),
                 PlanSection(
                     label="Chorus",
                     function="title_mantra",
-                    source_sentence_ids=["L116_001"],
+                    source_sentence_ids=[first],
                     treatment="sung",
                     repetition_count=3,
                 ),
                 PlanSection(
-                    label="Bridge - Guided Practice",
-                    function="practice",
-                    source_sentence_ids=["L116_010"],
-                    treatment="spoken",
-                    repetition_count=1,
-                ),
-                PlanSection(
                     label="Outro",
                     function="resolution",
-                    source_sentence_ids=["L116_001"],
+                    source_sentence_ids=[first],
                     treatment="sung",
                     repetition_count=2,
                 ),
             ],
             total_word_count=200,
-            spoken_word_count=50,
+            spoken_word_count=0,
         )
 
     def _mock_adaptation(self, user_prompt: str) -> StyleAdaptation:
-        import re
-
-        lesson_match = re.search(r"for Lesson\s+(\d+)|lesson_number=(\d+)", user_prompt)
-        lesson_number = int(lesson_match.group(1) or lesson_match.group(2)) if lesson_match else 116
-        style_match = re.search(r"style_id=([^\s,]+)|STYLE_\d+", user_prompt)
-        style_id = style_match.group(1) or style_match.group(0) if style_match else "STYLE_1"
+        unit_ref, sequence_index, lesson_number = _identity_from_prompt(user_prompt)
+        style_match = re.search(r"style_id=([^\s,]+)|Style:\s*([^\s]+)", user_prompt)
+        style_id = next((group for group in style_match.groups() if group), "STYLE_1") if style_match else "STYLE_1"
+        core_match = re.search(r"Core prompt:\s*(.+)", user_prompt)
+        core_prompt = core_match.group(1).strip() if core_match else "Warm acoustic folk."
+        adaptation = "Set the tempo to 85 BPM. Emphasize vocal intimacy and clear diction."
         return StyleAdaptation(
-            style_id=style_id,
+            unit_ref=unit_ref,
+            sequence_index=sequence_index,
             lesson_number=lesson_number,
-            core_prompt="Warm acoustic folk.",
-            adaptation="Set the tempo to 85 BPM. Emphasize vocal intimacy, gentle choir, and a build-up arrangement.",
-            final_prompt="Warm acoustic folk. Set the tempo to 85 BPM. Emphasize vocal intimacy, gentle choir, and a build-up arrangement.",
+            style_id=style_id,
+            core_prompt=core_prompt,
+            adaptation=adaptation,
+            final_prompt=f"{core_prompt} {adaptation}",
             bpm=85,
             core_identity_preserved=True,
         )
 
     def _mock_lyrics(self, user_prompt: str) -> list[GeneratedLyric]:
-        import re
-
-        lesson_match = re.search(r"Lesson\s+(\d+):", user_prompt)
-        int(lesson_match.group(1)) if lesson_match else 116
-        source_text = user_prompt
         sentences_section = (
-            source_text.split("Source sentences:")[-1].strip()
-            if "Source sentences:" in source_text
+            user_prompt.split("Source sentences:")[-1].strip()
+            if "Source sentences:" in user_prompt
             else ""
         )
-        lines = [l.strip() for l in sentences_section.split("\n") if l.strip() and ":" in l]
-        sung_lines = (
-            [l.split(":", 1)[1].strip() for l in lines[:3]]
-            if len(lines) >= 3
-            else ["For morning and evening review."]
-        )
-        spoken_lines = (
-            [l.split(":", 1)[1].strip() for l in lines[3:6]]
-            if len(lines) >= 6
-            else ["On the hour:"]
-        )
+        lines = [line.strip() for line in sentences_section.split("\n") if line.strip() and ":" in line]
+        source_lines = [line.split(":", 1)[1].strip() for line in lines]
+        if not source_lines:
+            source_lines = ["For morning and evening review."]
+        first = source_lines[0]
+        second = source_lines[1] if len(source_lines) > 1 else first
         return [
             GeneratedLyric(section_label="Intro", text="(Soft instrumental)"),
-            GeneratedLyric(
-                section_label="Verse 1",
-                text=sung_lines[0] if len(sung_lines) > 0 else "This is the day of peace.",
-            ),
-            GeneratedLyric(
-                section_label="Chorus", text=sung_lines[1] if len(sung_lines) > 1 else sung_lines[0]
-            ),
-            GeneratedLyric(
-                section_label="Bridge - Guided Practice",
-                text=f"(Spoken) {spoken_lines[0]}" if spoken_lines else "(Spoken) Let us review.",
-            ),
-            GeneratedLyric(section_label="Outro", text=sung_lines[-1]),
+            GeneratedLyric(section_label="Verse 1", text=second),
+            GeneratedLyric(section_label="Chorus", text=first),
+            GeneratedLyric(section_label="Outro", text=first),
         ]
 
 
@@ -378,80 +387,111 @@ def create_llm_provider(
 
 
 def analyze_lesson(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     llm: LLMProvider,
     prompt_version: str = "0.1.0",
 ) -> LessonAnalysisProfile:
     system_prompt = _load_prompt_section("lesson analyzer")
     user_prompt = (
-        f"Analyze the following ACIM Workbook lesson {lesson.lesson_number}:\n\n"
-        f"Title: {lesson.title}\n\n"
-        f"Source text:\n{lesson.source_text}\n\n"
-        f"Lesson type: {lesson.lesson_type.value}\n"
+        "Analyze the following approved ACIM source unit.\n\n"
+        f"{_unit_context(lesson)}\n"
+        f"Source text:\n{lesson.source_text}\n"
     )
-    return llm.generate_structured(system_prompt, user_prompt, LessonAnalysisProfile)
+    result = llm.generate_structured(system_prompt, user_prompt, LessonAnalysisProfile)
+    return result.model_copy(
+        update={
+            "unit_ref": lesson.unit_ref,
+            "sequence_index": lesson.sequence_index,
+            "lesson_number": lesson.lesson_number,
+            "language": lesson.language,
+            "lesson_type": lesson.lesson_type,
+            "analyzed_source_hash": lesson.source.source_hash,
+        }
+    )
+
+
+analyze_unit = analyze_lesson
 
 
 def score_compatibility(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     styles: list[StyleRecord],
     llm: LLMProvider,
     prompt_version: str = "0.1.0",
 ) -> list[CompatibilityScore]:
     system_prompt = _load_prompt_section("compatibility scorer")
-    lesson_info = (
-        f"Lesson {lesson.lesson_number}:\n"
-        f"Title: {lesson.title}\n"
-        f"Type: {lesson.lesson_type.value}\n"
-        f"Themes: {', '.join(getattr(lesson, 'themes', ['unknown']))}\n"
-    )
     styles_info = "\n".join(
-        f"style_id={s.style_id}, name={s.name}, bucket={s.primary_bucket}, "
-        f"energy={s.energy}, density={s.lyric_density}, prompt={s.core_prompt[:100]}"
-        for s in styles
+        f"style_id={style.style_id}, name={style.name}, bucket={style.primary_bucket}, "
+        f"energy={style.energy}, density={style.lyric_density}, prompt={style.core_prompt[:100]}"
+        for style in styles
     )
-    user_prompt = f"{lesson_info}\nAvailable styles:\n{styles_info}\n"
+    user_prompt = f"{_unit_context(lesson)}\nAvailable styles:\n{styles_info}\n"
     response = llm.generate_structured(system_prompt, user_prompt, CompatibilityScoreBatch)
-    return response.root
+    return [
+        score.model_copy(
+            update={
+                "unit_ref": lesson.unit_ref,
+                "sequence_index": lesson.sequence_index,
+                "lesson_number": lesson.lesson_number,
+                "language": lesson.language,
+            }
+        )
+        for score in response.root
+    ]
 
 
 def select_archetype(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     profile: LessonAnalysisProfile,
     llm: LLMProvider,
     prompt_version: str = "0.1.0",
 ) -> SongArchetype:
     system_prompt = _load_prompt_section("archetype selector")
+    ineligible = [SongArchetype.PAIRED_REVIEW.value] if lesson.unit_type == UnitType.TEXT_SECTION else []
     user_prompt = (
-        f"Lesson {lesson.lesson_number}: {lesson.title}\n"
-        f"Type: {lesson.lesson_type.value}\n"
+        f"{_unit_context(lesson)}"
         f"Themes: {', '.join(profile.themes)}\n"
-        f"Ranked archetypes: {[a.value for a in profile.ranked_archetypes]}\n"
+        f"Ranked archetypes: {[archetype.value for archetype in profile.ranked_archetypes]}\n"
+        f"Ineligible archetypes: {ineligible}\n"
         f"Number of paragraphs: {len(lesson.paragraphs)}\n"
     )
     response = llm.generate_structured(system_prompt, user_prompt, SongArchetypeSelection)
+    if lesson.unit_type == UnitType.TEXT_SECTION and response.archetype == SongArchetype.PAIRED_REVIEW:
+        return SongArchetype.DECLARATION_DEVELOPMENT
     return response.archetype
 
 
 def plan_lyrics(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     archetype: SongArchetype,
     llm: LLMProvider,
     prompt_version: str = "0.1.0",
 ) -> LyricPlan:
     system_prompt = _load_prompt_section("lyric planner")
+    coverage_note = (
+        "For a Text section, cover the teaching arc across opening/setup, central teaching, "
+        "turning point or contrast, and resolution when the source supports those roles.\n"
+        if lesson.unit_type == UnitType.TEXT_SECTION
+        else ""
+    )
     user_prompt = (
-        f"Create a lyric plan for Lesson {lesson.lesson_number}: {lesson.title}\n"
+        "Create a lyric plan for this approved ACIM source unit.\n"
+        f"{_unit_context(lesson)}"
         f"Archetype: {archetype.value}\n"
-        f"Lesson type: {lesson.lesson_type.value}\n\n"
+        f"{coverage_note}\n"
         f"Source text:\n{lesson.source_text}\n\n"
-        f"Sentences:\n"
-        + "\n".join(f"  {s.sentence_id} [{s.category}]: {s.text[:120]}" for s in lesson.sentences)
+        "Sentences:\n"
+        + "\n".join(
+            f"  {sentence.sentence_id} [{sentence.category}]: {sentence.text[:120]}"
+            for sentence in lesson.sentences
+        )
         + "\n"
     )
     result = llm.generate_structured(system_prompt, user_prompt, LyricPlan)
     return result.model_copy(
         update={
+            "unit_ref": lesson.unit_ref,
+            "sequence_index": lesson.sequence_index,
             "lesson_number": lesson.lesson_number,
             "language": lesson.language,
             "archetype": archetype,
@@ -460,7 +500,7 @@ def plan_lyrics(
 
 
 def adapt_style(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     style: StyleRecord,
     plan: LyricPlan,
     llm: LLMProvider,
@@ -468,7 +508,9 @@ def adapt_style(
 ) -> StyleAdaptation:
     system_prompt = _load_prompt_section("bounded style adapter")
     user_prompt = (
-        f"Adapt style {style.style_id} ({style.name}) for Lesson {lesson.lesson_number}.\n\n"
+        f"{_unit_context(lesson)}"
+        f"Style: {style.style_id}\n"
+        f"Style name: {style.name}\n\n"
         f"Core prompt: {style.core_prompt}\n"
         f"Primary bucket: {style.primary_bucket}\n"
         f"Tempo range: {style.tempo_min}-{style.tempo_max} BPM\n"
@@ -476,14 +518,21 @@ def adapt_style(
         f"Density: {style.lyric_density}\n"
         f"Locked traits: {style.locked_traits}\n"
         f"Mutable traits: {style.mutable_traits}\n\n"
-        f"Lesson: {lesson.title}\n"
         f"Archetype: {plan.archetype.value}\n"
     )
-    return llm.generate_structured(system_prompt, user_prompt, StyleAdaptation)
+    result = llm.generate_structured(system_prompt, user_prompt, StyleAdaptation)
+    return result.model_copy(
+        update={
+            "unit_ref": lesson.unit_ref,
+            "sequence_index": lesson.sequence_index,
+            "lesson_number": lesson.lesson_number,
+            "style_id": style.style_id,
+        }
+    )
 
 
 def generate_lyrics(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     plan: LyricPlan,
     adaptation: StyleAdaptation,
     llm: LLMProvider,
@@ -491,18 +540,19 @@ def generate_lyrics(
 ) -> list[GeneratedLyric]:
     system_prompt = _load_prompt_section("lyric writer")
     user_prompt = (
-        f"Generate verbatim-only lyrics for Lesson {lesson.lesson_number}: {lesson.title}\n\n"
+        "Generate verbatim-only lyrics for this approved ACIM source unit.\n\n"
+        f"{_unit_context(lesson)}"
         f"Archetype: {plan.archetype.value}\n"
         f"Style: {adaptation.final_prompt}\n\n"
-        f"Plan:\n"
+        "Plan:\n"
         + "\n".join(
-            f"  [{s.label}] {s.function} - {s.treatment} x{s.repetition_count} - "
-            f"source IDs: {s.source_sentence_ids}"
-            for s in plan.sections
+            f"  [{section.label}] {section.function} - {section.treatment} "
+            f"x{section.repetition_count} - source IDs: {section.source_sentence_ids}"
+            for section in plan.sections
         )
         + "\n\nSource sentences:\n"
-        + "\n".join(f"  {s.sentence_id}: {s.text}" for s in lesson.sentences)
-        + "\n\nProduce lyrics with [Section] headers and (ad-lib) directions."
+        + "\n".join(f"  {sentence.sentence_id}: {sentence.text}" for sentence in lesson.sentences)
+        + "\n\nProduce lyrics with conservative [Section] headers only."
     )
     response = llm.generate_structured(system_prompt, user_prompt, GeneratedLyricsResponse)
     return response.root

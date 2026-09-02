@@ -10,7 +10,7 @@ from .models import (
     AssignmentConstraints,
     AssignmentRecord,
     CompatibilityScore,
-    LessonRecord,
+    SourceUnit,
     StyleRecord,
 )
 
@@ -20,7 +20,7 @@ class AssignmentError(RuntimeError):
 
 
 def optimize_assignments(
-    lessons: list[LessonRecord],
+    lessons: list[SourceUnit],
     styles: list[StyleRecord],
     scores: list[CompatibilityScore],
     constraints: AssignmentConstraints,
@@ -28,69 +28,68 @@ def optimize_assignments(
     assignment_version: str = "scipy-milp-0.1.0",
 ) -> list[AssignmentRecord]:
     if not lessons or not styles:
-        raise AssignmentError("At least one lesson and style are required")
+        raise AssignmentError("At least one source unit and style are required")
 
-    lessons = sorted(lessons, key=lambda item: (item.language, item.lesson_number))
+    units = sorted(lessons, key=lambda item: (item.language, item.sequence_index, item.unit_ref))
     style_by_id = {style.style_id: style for style in styles}
     if len(style_by_id) != len(styles):
         raise AssignmentError("Duplicate style_id values are not allowed")
 
-    required = len(lessons)
+    required = len(units)
     minimum_capacity = len(styles) * constraints.minimum_style_usage
     maximum_capacity = len(styles) * constraints.maximum_style_usage
     if not minimum_capacity <= required <= maximum_capacity:
         raise AssignmentError(
             "Style usage constraints are infeasible: "
-            f"{required} lessons require capacity in "
+            f"{required} source units require capacity in "
             f"[{minimum_capacity}, {maximum_capacity}]"
         )
 
     score_map = {
-        (score.lesson_number, score.language, score.style_id): score.total for score in scores
+        (score.unit_ref, score.language, score.style_id): score.total for score in scores
     }
     unknown_styles = {score.style_id for score in scores} - set(style_by_id)
     if unknown_styles:
         raise AssignmentError(f"Scores reference unknown styles: {sorted(unknown_styles)}")
 
-    lesson_count = len(lessons)
+    unit_count = len(units)
     style_count = len(styles)
-    variable_count = lesson_count * style_count
+    variable_count = unit_count * style_count
 
-    def variable_index(lesson_index: int, style_index: int) -> int:
-        return lesson_index * style_count + style_index
+    def variable_index(unit_index: int, style_index: int) -> int:
+        return unit_index * style_count + style_index
 
     objective = np.zeros(variable_count, dtype=float)
-    for li, lesson in enumerate(lessons):
+    for ui, unit in enumerate(units):
         for si, style in enumerate(styles):
-            key = (lesson.lesson_number, lesson.language, style.style_id)
+            key = (unit.unit_ref, unit.language, style.style_id)
             if key not in score_map and constraints.missing_score_policy == "error":
                 raise AssignmentError(
                     "Missing compatibility score for "
-                    f"lesson={lesson.lesson_number}/{lesson.language}, "
-                    f"style={style.style_id}"
+                    f"unit={unit.unit_ref}/{unit.language}, style={style.style_id}"
                 )
-            objective[variable_index(li, si)] = -score_map.get(key, 0.0)
+            objective[variable_index(ui, si)] = -score_map.get(key, 0.0)
 
     rows: list[tuple[dict[int, float], float, float]] = []
 
-    for li in range(lesson_count):
-        rows.append(({variable_index(li, si): 1.0 for si in range(style_count)}, 1.0, 1.0))
+    for ui in range(unit_count):
+        rows.append(({variable_index(ui, si): 1.0 for si in range(style_count)}, 1.0, 1.0))
 
     for si in range(style_count):
         rows.append(
             (
-                {variable_index(li, si): 1.0 for li in range(lesson_count)},
+                {variable_index(ui, si): 1.0 for ui in range(unit_count)},
                 float(constraints.minimum_style_usage),
                 float(constraints.maximum_style_usage),
             )
         )
 
     if constraints.minimum_exact_style_gap > 0:
-        for left in range(lesson_count):
-            for right in range(left + 1, lesson_count):
-                if lessons[left].language != lessons[right].language:
+        for left in range(unit_count):
+            for right in range(left + 1, unit_count):
+                if units[left].language != units[right].language:
                     continue
-                distance = lessons[right].lesson_number - lessons[left].lesson_number
+                distance = units[right].sequence_index - units[left].sequence_index
                 if distance >= constraints.minimum_exact_style_gap:
                     break
                 for si in range(style_count):
@@ -111,19 +110,19 @@ def optimize_assignments(
 
     run_limit = constraints.maximum_consecutive_primary_bucket
     window_size = run_limit + 1
-    for start in range(lesson_count - window_size + 1):
-        window = lessons[start : start + window_size]
-        if len({lesson.language for lesson in window}) != 1:
+    for start in range(unit_count - window_size + 1):
+        window = units[start : start + window_size]
+        if len({unit.language for unit in window}) != 1:
             continue
-        numbers = [lesson.lesson_number for lesson in window]
-        if numbers != list(range(numbers[0], numbers[0] + window_size)):
+        indexes = [unit.sequence_index for unit in window]
+        if indexes != list(range(indexes[0], indexes[0] + window_size)):
             continue
         for style_indexes in bucket_to_style_indexes.values():
             rows.append(
                 (
                     {
-                        variable_index(li, si): 1.0
-                        for li in range(start, start + window_size)
+                        variable_index(ui, si): 1.0
+                        for ui in range(start, start + window_size)
                         for si in style_indexes
                     },
                     -np.inf,
@@ -154,23 +153,23 @@ def optimize_assignments(
         )
 
     assignments: list[AssignmentRecord] = []
-    solution = result.x.reshape((lesson_count, style_count))
-    for li, lesson in enumerate(lessons):
-        selected = np.flatnonzero(solution[li] > 0.5)
+    solution = result.x.reshape((unit_count, style_count))
+    for ui, unit in enumerate(units):
+        selected = np.flatnonzero(solution[ui] > 0.5)
         if len(selected) != 1:
             raise AssignmentError(
-                f"Solver returned {len(selected)} styles for lesson {lesson.lesson_number}"
+                f"Solver returned {len(selected)} styles for unit {unit.unit_ref}"
             )
         style = styles[int(selected[0])]
         assignments.append(
             AssignmentRecord(
-                lesson_number=lesson.lesson_number,
-                language=lesson.language,
+                unit_ref=unit.unit_ref,
+                sequence_index=unit.sequence_index,
+                lesson_number=unit.lesson_number,
+                language=unit.language,
                 style_id=style.style_id,
                 primary_bucket=style.primary_bucket,
-                fit_score=float(
-                    score_map.get((lesson.lesson_number, lesson.language, style.style_id), 0.0)
-                ),
+                fit_score=float(score_map.get((unit.unit_ref, unit.language, style.style_id), 0.0)),
                 assignment_version=assignment_version,
             )
         )
