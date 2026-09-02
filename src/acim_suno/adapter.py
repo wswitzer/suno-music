@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from .llm import LLMProvider, adapt_style
-from .models import LessonRecord, LyricPlan, StyleAdaptation, StyleRecord
+from .models import LyricPlan, SourceUnit, StyleAdaptation, StyleRecord
 
 
 def create_style_adaptation(
-    lesson: LessonRecord,
+    lesson: SourceUnit,
     style: StyleRecord,
     plan: LyricPlan,
     llm: LLMProvider,
