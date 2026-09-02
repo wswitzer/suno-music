@@ -19,6 +19,8 @@ def convert_to_final_artifact(
     repair_count: int = 0,
 ) -> FinalSongArtifact:
     return FinalSongArtifact(
+        unit_ref=song.unit_ref,
+        sequence_index=song.sequence_index,
         lesson_number=song.lesson_number,
         language=song.language,
         title=song.title,
@@ -51,9 +53,9 @@ def export_suno_batch(
             for song, report in zip(songs, reports, strict=False)
         ]
     else:
-        artifacts = [convert_to_final_artifact(s) for s in songs]
+        artifacts = [convert_to_final_artifact(song) for song in songs]
 
-    passed_count = sum(1 for a in artifacts if a.passed_validation)
+    passed_count = sum(1 for artifact in artifacts if artifact.passed_validation)
     failed_count = len(artifacts) - passed_count
 
     batch = BatchExport(
@@ -75,6 +77,8 @@ def export_suno_batch(
         writer = csv.DictWriter(
             f,
             fieldnames=[
+                "unit_ref",
+                "sequence_index",
                 "lesson_number",
                 "title",
                 "archetype",
@@ -89,7 +93,9 @@ def export_suno_batch(
         for song in artifacts:
             writer.writerow(
                 {
-                    "lesson_number": song.lesson_number,
+                    "unit_ref": song.unit_ref,
+                    "sequence_index": song.sequence_index,
+                    "lesson_number": song.lesson_number if song.lesson_number is not None else "",
                     "title": song.title,
                     "archetype": song.archetype,
                     "style_id": song.style_id,
@@ -120,13 +126,17 @@ def export_lesson_folder(
     *,
     output_dir: str | Path = "outputs/lessons",
 ) -> Path:
-    lesson_dir = Path(output_dir) / f"lesson_{song.lesson_number:03d}"
-    lesson_dir.mkdir(parents=True, exist_ok=True)
+    if song.lesson_number is not None:
+        folder_name = f"lesson_{song.lesson_number:03d}"
+    else:
+        folder_name = song.unit_ref
+    unit_dir = Path(output_dir) / folder_name
+    unit_dir.mkdir(parents=True, exist_ok=True)
 
-    lyrics_path = lesson_dir / "lyrics.txt"
+    lyrics_path = unit_dir / "lyrics.txt"
     lyrics_path.write_text(song.full_lyrics_text, encoding="utf-8")
 
-    artifact_path = lesson_dir / "artifact.json"
+    artifact_path = unit_dir / "artifact.json"
     artifact_path.write_text(
         json.dumps(
             convert_to_final_artifact(song, report).model_dump(mode="json"),
@@ -137,4 +147,4 @@ def export_lesson_folder(
         encoding="utf-8",
     )
 
-    return lesson_dir
+    return unit_dir
