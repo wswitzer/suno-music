@@ -1,5 +1,8 @@
 # ACIM Suno Pipeline
 
+**Status:** working tooling and tests for the deterministic parts of an experimental music-generation workflow; not an end-to-end hosted product. The repository deliberately leaves parts of provider integration behind interfaces.
+
+
 Starter implementation for assigning a curated pool of Suno styles to ACIM Workbook lessons and preparing a reproducible lyric-generation workflow.
 
 The code implements the parts that should be deterministic:
